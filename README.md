@@ -253,6 +253,22 @@ python -m superbot.main --dashboard-port 5000
 
 Une fois démarré, le Dashboard local est accessible sur `http://localhost:5000` et les métriques Prometheus sur `http://localhost:8000/metrics`.
 
+### Visualisation des stratégies et des backtests
+
+Le dashboard propose les vues `Performance`, `Journal des trades`, `Comparaison` et `Optimisation` depuis sa navigation. Les vues de performance et de trades utilisent l'historique fermé du bot. Le journal affiche toutes les paires dans le P&L net et permet de sélectionner une paire pour comparer ses prix d'entrée et de sortie. La comparaison et l'optimisation lisent les rapports JSON générés par `BacktestReport.save_json()` dans `superbot/backtest/results/`.
+
+Le dossier de rapports peut être remplacé par la variable `BACKTEST_RESULTS_DIR`. La comparaison requiert au moins deux rapports; les corrélations sont calculées sur leurs mois communs. La sensibilité requiert des valeurs numériques différentes dans `params_used`. Les résultats walk-forward sont affichés lorsqu'ils sont inclus, même sans balayage de paramètres. Sans données suffisantes, les pages indiquent ce qui manque sans afficher de graphiques vides ou factices.
+
+Le visualizer autonome accepte les JSON natifs de `BacktestReport.save_json()` ainsi que les anciens rapports avec sections `metadata`, `metrics` et `stats` :
+
+```powershell
+python scripts/backtest_visualizer.py --input "superbot/backtest/results/*.json" --compare --output reports/analysis.html
+python scripts/backtest_visualizer.py --input "superbot/backtest/results/*.json" --optimize SCORE_MIN RISK_PCT --output reports/optimization.html
+python scripts/backtest_visualizer.py --input reports/in_sample.json reports/out_sample.json --walk-forward --output reports/walk_forward.html
+```
+
+Le rapport HTML comprend la courbe d'équité et son drawdown, les rendements mensuels, les métriques roulantes, la distribution des trades et les indicateurs de risque. `--compare` ajoute les tableaux, courbes d'équité comparées et corrélations lorsque plusieurs fichiers sont fournis. `--optimize PARAM1 PARAM2` ajoute l'analyse de sensibilité et, si les deux paramètres varient, la heatmap. `--walk-forward` requiert exactement deux fichiers d'entrée dans l'ordre In-Sample puis Out-of-Sample. Les exports statiques sont optionnels : ajoutez `--png` ou `--pdf` et installez `matplotlib` (`pip install matplotlib`). Les graphiques interactifs utilisent ApexCharts chargé depuis un CDN.
+
 Licence
 
 ## 🧪 Validation & Tests Automatisés
