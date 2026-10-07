@@ -31,6 +31,9 @@ class MurphyTrendStrategy(BaseStrategy):
         self.exhaustion_guard = bool(self.config.get("MURPHY_EXHAUSTION_GUARD", True))
         self.rsi_ob = float(self.config.get("RSI_OB", 70))
         self.rsi_os = float(self.config.get("RSI_OS", 30))
+        # ADX minimum pour déclencher. Étude H1 broker 3 ans : 25 → PF 1,70/1,94 (train/test), gain total
+        # conservé et moins de mois perdants (contre 1,58/1,86 à 20).
+        self.min_adx = float(self.config.get("MURPHY_MIN_ADX", 20))
 
     def analyze(
         self,
@@ -79,7 +82,7 @@ class MurphyTrendStrategy(BaseStrategy):
         trigger_long = False
         trigger_short = False
 
-        if bullish_alignment and adx >= 20:
+        if bullish_alignment and adx >= self.min_adx:
             if donch_u > 0 and close >= donch_u:
                 trigger_long = True  # Breakout de plus haut de 20 périodes
             elif float(prev['low']) <= ema_21 and close > ema_21 and rsi >= 50:
@@ -87,7 +90,7 @@ class MurphyTrendStrategy(BaseStrategy):
             elif close > ema_21 > ema_55 and rsi >= 50:
                 trigger_long = True  # Continuation de tendance forte
 
-        if bearish_alignment and adx >= 20:
+        if bearish_alignment and adx >= self.min_adx:
             if donch_l > 0 and close <= donch_l:
                 trigger_short = True  # Breakout de plus bas de 20 périodes
             elif float(prev['high']) >= ema_21 and close < ema_21 and rsi <= 50:

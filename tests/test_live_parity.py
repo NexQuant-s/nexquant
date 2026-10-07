@@ -18,6 +18,22 @@ def test_engine_configure_keeps_filter():
     assert set(engine.strategies) == {"MURPHY_TREND"}
 
 
+def test_murphy_min_adx_threshold():
+    import pandas as pd
+    from superbot.brain.regime_detector import RegimeResult
+    from superbot.strategy.murphy_trend import MurphyTrendStrategy
+
+    n = 40
+    close = [100 + i * 0.1 for i in range(n)]
+    df = pd.DataFrame({"open": close, "high": [c + 0.05 for c in close], "low": [c - 0.05 for c in close],
+                       "close": close, "ema_fast": [c - 0.2 for c in close], "ema_slow": [c - 0.5 for c in close],
+                       "ema_trend": [c - 1.0 for c in close], "adx": 22.0, "rsi": 60.0, "atr": 0.3})
+    regime = RegimeResult(regime="trending_bull", confidence=0.8)
+    args = (df, "EURUSD", regime, "forex_major", close[-1])
+    assert MurphyTrendStrategy({}).analyze(*args).trigger_long is True            # défaut 20 : inchangé
+    assert MurphyTrendStrategy({"MURPHY_MIN_ADX": 25}).analyze(*args).trigger_long is False
+
+
 def test_strategy_sl_tp_only_when_enabled_and_coherent(monkeypatch):
     long_sig = {"should_long": True, "sl_price": 1.0950, "tp_price": 1.1100}
     monkeypatch.setattr("superbot.config.USE_STRATEGY_SL_TP", False)
