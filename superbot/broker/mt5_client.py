@@ -15,6 +15,7 @@ Caractéristiques :
 import logging
 import math
 import time
+import threading
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 import pandas as pd
@@ -81,6 +82,7 @@ class MT5Client(Broker):
         if self._server:
             self._init_kwargs["server"] = self._server
 
+        self._api_lock = threading.RLock()
         self._connected = False
         self._connect_terminal()
 
@@ -142,31 +144,33 @@ class MT5Client(Broker):
     def _call_api(self, api_func, default_val, *args, idempotent=True, **kwargs):
         """
         Wrapper unifié pour les appels MT5 avec retry et reconnexion automatique.
+        Thread-safe : sérialise les appels au terminal MT5 via _api_lock.
         """
-        self._ensure_connected()
-        max_retries = 3 if idempotent else 1
-        backoff = 0.5
-        for attempt in range(1, max_retries + 1):
-            try:
-                res = api_func(*args, **kwargs)
-                if res is None or res is False:
-                    err = mt5.last_error() if mt5 else "N/A"
-                    if attempt < max_retries:
-                        log.debug(f"Appel MT5 returned {res} (err: {err}). Retry {attempt}/{max_retries}...")
-                        self._connect_terminal()
-                        time.sleep(backoff)
-                        backoff *= 2.0
-                        continue
-                return res
-            except Exception as e:
-                if attempt == max_retries:
-                    log.error(f"Échec critique appel MT5 après {max_retries} essais : {e}")
-                    return default_val
-                log.warning(f"Exception appel MT5 : {e}. Retry {attempt}/{max_retries}...")
-                self._connect_terminal()
-                time.sleep(backoff)
-                backoff *= 2.0
-        return default_val
+        with self._api_lock:
+            self._ensure_connected()
+            max_retries = 3 if idempotent else 1
+            backoff = 0.5
+            for attempt in range(1, max_retries + 1):
+                try:
+                    res = api_func(*args, **kwargs)
+                    if res is None or res is False:
+                        err = mt5.last_error() if mt5 else "N/A"
+                        if attempt < max_retries:
+                            log.debug(f"Appel MT5 returned {res} (err: {err}). Retry {attempt}/{max_retries}...")
+                            self._connect_terminal()
+                            time.sleep(backoff)
+                            backoff *= 2.0
+                            continue
+                    return res
+                except Exception as e:
+                    if attempt == max_retries:
+                        log.error(f"Échec critique appel MT5 après {max_retries} essais : {e}")
+                        return default_val
+                    log.warning(f"Exception appel MT5 : {e}. Retry {attempt}/{max_retries}...")
+                    self._connect_terminal()
+                    time.sleep(backoff)
+                    backoff *= 2.0
+            return default_val
 
     def normalize_symbol(self, symbol: str) -> str:
         """Normalise le nom du symbole pour MT5."""
@@ -589,9 +593,12 @@ class MT5Client(Broker):
 
         # Vérification préventive de la marge requise pour éviter le rejet 10019 (No money)
         try:
-            acc_info = mt5.account_info()
+            acc_info = self._call_api(mt5.account_info, None)
             if acc_info and getattr(acc_info, 'margin_free', 0) > 0:
-                needed_margin = mt5.order_calc_margin(order_type, symbol, amount_lots, price)
+                needed_margin = self._call_api(
+                    lambda: mt5.order_calc_margin(order_type, symbol, amount_lots, price),
+                    None
+                )
                 if needed_margin and needed_margin > acc_info.margin_free * 0.90:
                     max_affordable_margin = acc_info.margin_free * 0.90
                     scaling = max_affordable_margin / needed_margin
