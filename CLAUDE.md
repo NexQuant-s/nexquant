@@ -81,6 +81,9 @@ Clôtures : `components/position_syncer.py`. Autres : `brain/session_manager.py`
   ELDER et UNIFIED_ALPHA perdent (PF ≈ 0,9). En 15m le système perd (PF ≈ 0,9). L'avantage
   **disparaît avec les sorties du live** (SL/TP ATR de `stop_manager`, PF ≈ 1,0) : il vient du SL
   Donchian de Murphy. Très sensible aux coûts (×2 → PF ≈ 1,0-1,2). DD ≈ 35 % à 1 % de risque/trade.
+  Filtres testés (choisis sur train) : `SCORE_MIN=10` → PF 1,87/1,85, tous symboles > 1,2, DD 14 % à
+  0,5 %, ~46 trades/mois ; ADX ≥ 25 redondant avec score 10 ; tendance D1 (EMA50) : 1,96/1,88 mais
+  EURUSD ≈ 1,0 en test (non retenu). Plafond observé hors échantillon ≈ 1,9 ; PF ≥ 2 seulement sur l'or.
 - Backtest : `_simulate` passe désormais `df_full` (avec indicateurs) à la stratégie — avant le
   07/10/2026 il passait l'OHLCV brut (régimes faux, aucune tendance) : **tous les backtests antérieurs
   sont invalides**. Les sessions suivent l'heure de la bougie (`get_active_sessions(heure UTC)`).
