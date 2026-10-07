@@ -28,6 +28,7 @@ jobs:
         python -m pip install schedule>=1.1.0
         python -m pip install pytest pytest-mock pytest-cov
         python -m pip install -r requirements.txt
+        python -m pip install -e .
         
     - name: Run Tests (including Chaos Engineering)
       env:
