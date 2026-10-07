@@ -125,6 +125,8 @@ ENABLED_STRATEGIES = [s.strip().upper() for s in os.getenv("ENABLED_STRATEGIES",
 USE_STRATEGY_SL_TP = os.getenv("USE_STRATEGY_SL_TP", "false").lower() == "true"
 # true = signaux calculés sur la dernière bougie CLÔTURÉE, une fois par bougie (parité avec le backtest)
 SIGNAL_ON_CLOSED_BAR = os.getenv("SIGNAL_ON_CLOSED_BAR", "false").lower() == "true"
+# ADX minimum de déclenchement de MURPHY_TREND (20 = historique ; 25 recommandé, cf. CLAUDE.md)
+MURPHY_MIN_ADX = float(os.getenv("MURPHY_MIN_ADX", "20"))
 
 # Forex filters
 MAX_FOREX_CURRENCY_EXPOSURE = int(os.getenv("MAX_FOREX_CURRENCY_EXPOSURE", "2"))
@@ -523,7 +525,7 @@ __all__ = [
     "MIN_POSITION_SIZE", "MAX_POSITION_SIZE", "KELLY_FRACTION", "MIN_TRADES_FOR_KELLY",
     "COOLDOWN_SECONDS",
     "MAX_FOREX_CURRENCY_EXPOSURE", "MAX_SPREAD_PIPS", "MAX_SPREAD_PIPS_CRYPTO", "MAX_SPREAD_PIPS_COMMODITY",
-    "BE_DYN_RR", "BE_DYN_RR_RATIO", "ENABLED_STRATEGIES", "USE_STRATEGY_SL_TP", "SIGNAL_ON_CLOSED_BAR",
+    "BE_DYN_RR", "BE_DYN_RR_RATIO", "ENABLED_STRATEGIES", "USE_STRATEGY_SL_TP", "SIGNAL_ON_CLOSED_BAR", "MURPHY_MIN_ADX",
     "DRAWDOWN_REDUCE_5PCT", "DRAWDOWN_REDUCE_10PCT", "DRAWDOWN_THRESH_1", "DRAWDOWN_THRESH_2",
 
     # Protection nocturne
