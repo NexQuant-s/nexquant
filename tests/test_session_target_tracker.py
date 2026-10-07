@@ -2,7 +2,6 @@
 tests/test_session_target_tracker.py
 Tests unitaires pour le traqueur d'objectif de session journalière (Cible 35€ - 40€).
 """
-import pytest
 from superbot.brain.session_target_tracker import SessionTargetTracker
 from superbot.risk.risk_manager import RiskManager
 from superbot.broker.symbol_specs import get_asset_class

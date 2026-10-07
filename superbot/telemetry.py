@@ -6,7 +6,7 @@ import logging
 import os
 import queue
 import threading
-from typing import Dict, Any, Optional
+from typing import Optional
 
 log = logging.getLogger("telemetry")
 
@@ -108,14 +108,14 @@ class TelemetryClient:
                 endpoint, data = task
                 try:
                     self._post_immediate(endpoint, data)
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log.debug(f"Erreur ignorée (non bloquante) : {_exc}")
                 finally:
                     self._telemetry_queue.task_done()
             except queue.Empty:
                 continue
-            except Exception:
-                pass
+            except Exception as _exc:
+                log.debug(f"Erreur ignorée (non bloquante) : {_exc}")
 
     def stop(self):
         """Arrête proprement le thread de télémétrie."""
@@ -256,8 +256,8 @@ class TelemetryLoggingHandler(logging.Handler):
                 message=message,
                 source=record.name
             )
-        except Exception:
-            pass
+        except Exception as _exc:
+            log.debug(f"Erreur ignorée (non bloquante) : {_exc}")
 
 
 from prometheus_client import start_http_server, Gauge, Counter, Histogram

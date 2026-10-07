@@ -4,7 +4,7 @@ Tests unitaires pour MarketRegimeDetector (Matières Premières & Forex).
 import pytest
 import pandas as pd
 import numpy as np
-from superbot.brain.regime_detector import MarketRegimeDetector, RegimeResult
+from superbot.brain.regime_detector import MarketRegimeDetector
 from superbot.indicators.technical_indicators import TechnicalIndicators
 from superbot.strategy.knowledge_base import calculate_hurst_exponent, calculate_half_life
 

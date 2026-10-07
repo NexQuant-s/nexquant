@@ -26,7 +26,7 @@ import logging
 import os
 import threading
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 from pathlib import Path
 from contextlib import contextmanager
 
@@ -46,10 +46,9 @@ class NexQuantDB:
 
     def __init__(self, db_path: str = None):
         if db_path is None:
-            # Répertoire par défaut : superbot/db/nexquant.db
-            default_dir = Path(__file__).parent
-            default_dir.mkdir(parents=True, exist_ok=True)
-            db_path = str(default_dir / "nexquant.db")
+            # Chemin configuré (superbot/db/nexquant.db par défaut, redirigé par les tests via DB_PATH)
+            from superbot.config import DB_PATH
+            db_path = DB_PATH
 
         self.db_path = db_path
         self._lock = threading.RLock()
@@ -344,31 +343,41 @@ class NexQuantDB:
              opened_at, closed_at, broker, is_paper, tags, metadata)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """
+        # Les trades du position_syncer utilisent d'autres noms de champs (position_size,
+        # timestamp = clôture, open_time, signal_score…) : on les mappe pour ne plus perdre
+        # la taille ni confondre ouverture et clôture. position_id sert d'identifiant
+        # stable (INSERT OR REPLACE ne crée donc plus de doublon pour une même position).
+        trade_id = trade.get('trade_id') or (f"mt5-{trade['position_id']}" if trade.get('position_id') else None)
+        closed_at = trade.get('closed_at') or (trade.get('timestamp') if trade.get('status') == 'closed' else None)
+        metadata = dict(trade.get('metadata') or {})
+        for key in ('verified', 'close_reason', 'position_id'):
+            if trade.get(key) is not None:
+                metadata.setdefault(key, trade.get(key))
         params = (
-            trade.get('trade_id'),
+            trade_id,
             trade.get('symbol', ''),
             trade.get('side', ''),
             trade.get('entry_price'),
             trade.get('exit_price'),
-            trade.get('size'),
+            trade.get('size', trade.get('position_size')),
             trade.get('pnl'),
             trade.get('pnl_pct'),
             trade.get('strategy_name'),
             trade.get('market_regime'),
             trade.get('session_name'),
-            trade.get('score'),
+            trade.get('score', trade.get('signal_score')),
             trade.get('rr_ratio'),
-            trade.get('sl_price'),
-            trade.get('tp_price'),
+            trade.get('sl_price', trade.get('stop_loss')),
+            trade.get('tp_price', trade.get('take_profit')),
             trade.get('atr_at_entry'),
             trade.get('sentiment_score'),
             trade.get('duration_min'),
-            trade.get('opened_at', datetime.now(timezone.utc).isoformat()),
-            trade.get('closed_at'),
+            trade.get('opened_at') or trade.get('open_time') or closed_at or datetime.now(timezone.utc).isoformat(),
+            closed_at,
             trade.get('broker', 'mt5'),
             1 if trade.get('is_paper', True) else 0,
             json.dumps(trade.get('tags', [])),
-            json.dumps(trade.get('metadata', {}))
+            json.dumps(metadata, default=str)
         )
         with self.transaction() as conn:
             cursor = conn.execute(sql, params)

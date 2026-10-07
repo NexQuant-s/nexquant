@@ -1,28 +1,23 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╩
 """
-import pandas as pd
-import numpy as np
 import requests
 import time
-import json
 import threading
 from datetime import datetime, timedelta
 from typing import Dict, Any, Tuple, List, Optional
 import logging
 from dataclasses import dataclass, asdict
-import html
-import re
 
 # Importer la configuration
 from superbot.config import (
-    FEAR_GREED_API, FOREXFACTORY_API,
-    NEWS_AVOIDANCE_BEFORE, NEWS_AVOIDANCE_AFTER, NEWS_RISK_REDUCTION_FACTOR,
-    NEWS_HIGH_IMPACT_ONLY, NEWS_ASSETS, NEWS_UPDATE_INTERVAL,
-    FEAR_GREED_EXTREME_FEAR, FEAR_GREED_EXTREME_GREED
+    FEAR_GREED_API, FOREXFACTORY_API
 )
 
 log = logging.getLogger("news_manager")
+
+# Base de l'API publique CryptoCompare (nouvelles : /v2/news/)
+CRYPTOCOMPARE_API = "https://min-api.cryptocompare.com/data"
 
 
 @dataclass
@@ -241,11 +236,14 @@ class NewsManager:
                         date_str = item.get('date', '')
                         time_str = item.get('time', '')
                         impact = item.get('impact', 'LOW')
-                        currency = item.get('currency', '')
+                        # Le flux faireconomy fournit la devise dans 'country' (ex: "USD")
+                        currency = item.get('currency') or item.get('country', '')
                         forecast = item.get('forecast', '')
                         previous = item.get('previous', '')
 
-                        # Filtrer selon les paramètres
+                        # Filtrer selon les paramètres (les jours fériés ne sont pas des annonces)
+                        if str(impact).lower() == 'holiday':
+                            continue
                         if self.high_impact_only and impact.upper() != 'HIGH':
                             continue
 
@@ -255,8 +253,23 @@ class NewsManager:
 
                         # Construire la timestamp
                         try:
-                            # Format de date de Forex Factory: "MM/DD/YYYY"
-                            # Format de time: "HH:MM" ou "Tentative"
+                            if 'T' in date_str:
+                                # Format actuel : ISO-8601 avec fuseau (ex: "2026-10-09T08:30:00-04:00").
+                                # Converti en heure locale naïve, comme datetime.now() dans ce module.
+                                news_time = datetime.fromisoformat(date_str).astimezone().replace(tzinfo=None)
+                                news_event = NewsEvent(
+                                    title=title,
+                                    source="Forex Factory",
+                                    timestamp=news_time,
+                                    impact=impact,
+                                    currency=currency,
+                                    description=f"Forecast: {forecast}, Previous: {previous}",
+                                    url=""
+                                )
+                                news_events.append(news_event)
+                                continue
+
+                            # Ancien format : date "MM/DD/YYYY" + time "HH:MM" ou "Tentative"
                             if time_str.lower() in ['tentative', 'all day', 'holiday']:
                                 continue  # Ignorer les événements non horodatés précisément
 
@@ -294,9 +307,12 @@ class NewsManager:
 
                 # Aussi mettre à jour les nouvelles générales
                 with self.news_lock:
-                    # Ne garder que les nouvelles récentes (24h)
+                    # Ne garder que les nouvelles récentes (24h) des AUTRES sources : le flux
+                    # ForexFactory renvoie toute la semaine à chaque rafraîchissement ; sans ce
+                    # filtre, ses événements (datés dans le futur) seraient dupliqués à chaque appel.
                     cutoff_time = datetime.now() - timedelta(hours=24)
-                    recent_news = [event for event in self.latest_news if event.timestamp > cutoff_time]
+                    recent_news = [event for event in self.latest_news
+                                   if event.timestamp > cutoff_time and event.source != "Forex Factory"]
                     self.latest_news = recent_news + news_events
                     # Trier par timestamp décroissant
                     self.latest_news.sort(key=lambda x: x.timestamp, reverse=True)
@@ -655,6 +671,21 @@ class NewsManager:
 
         return risk_factor
 
+    @staticmethod
+    def _symbol_currencies(symbol: str) -> List[str]:
+        """
+        Devises concernées par un symbole : 'EUR/USD' et 'EURUSD' -> ['EUR', 'USD'],
+        'XAUUSD' -> ['XAU', 'USD']. (Avec les symboles MT5 sans '/', l'ancien code
+        cherchait la devise 'EURUSD' et le filtre ne se déclenchait jamais.)
+        """
+        parts = [p for p in symbol.upper().replace('-', '/').split('/') if p]
+        if len(parts) >= 2:
+            return parts[:2]
+        clean = parts[0] if parts else ''
+        if len(clean) >= 6:
+            return [clean[:3], clean[3:6]]
+        return [clean]
+
     def should_avoid_trading_due_to_news(self, symbol: str = None,
                                         minutes_before: Optional[int] = None,
                                         minutes_after: Optional[int] = None) -> Tuple[bool, Optional[NewsEvent]]:
@@ -676,12 +707,7 @@ class NewsManager:
 
         # Déterminer quelles monnaies vérifier
         if symbol:
-            # Extraire la monnaie de base du symbole (ex: EUR/USD -> EUR)
-            base_currency = symbol.split('/')[0].upper() if '/' in symbol else symbol.upper()
-            quote_currency = symbol.split('/')[1].upper() if '/' in symbol and len(symbol.split('/')) > 1 else ''
-            currencies_to_check = [base_currency]
-            if quote_currency:
-                currencies_to_check.append(quote_currency)
+            currencies_to_check = self._symbol_currencies(symbol)
         else:
             currencies_to_check = self.assets[:]
 
@@ -708,22 +734,22 @@ class NewsManager:
 
         return False, None
 
+    def get_recent_news(self, hours: int = 24) -> List[NewsEvent]:
+        """Nouvelles déjà publiées dans les `hours` dernières heures (tous impacts)."""
+        now = datetime.now()
+        cutoff_time = now - timedelta(hours=hours)
+        with self.news_lock:
+            return [event for event in self.latest_news if cutoff_time < event.timestamp <= now]
+
     def get_recent_high_impact_news(self, hours: int = 24) -> List[NewsEvent]:
         """
-        Retourne les nouvelles à haut impact récentes.
+        Nouvelles à HAUT impact déjà publiées dans les `hours` dernières heures.
 
-        Args:
-            hours: Nombre d'heures à regarder en arrière
-
-        Returns:
-            Liste des événements de nouvelles à haut impact
+        L'ancienne version renvoyait aussi les événements FUTURS de la semaine (calendrier
+        ForexFactory) et tous les impacts : get_risk_factor() réduisait alors le risque
+        d'environ 65 % en permanence (facteur ≈ 0,35 mesuré dans les logs).
         """
-        cutoff_time = datetime.now() - timedelta(hours=hours)
-        with self.news_lock:
-            return [
-                event for event in self.latest_news
-                if event.timestamp > cutoff_time
-            ]
+        return [event for event in self.get_recent_news(hours) if event.is_high_impact()]
 
     def get_fear_greed_level(self) -> Tuple[Optional[int], Optional[str]]:
         """
@@ -773,7 +799,7 @@ class NewsManager:
                     'description': event.description,
                     'url': event.url
                 }
-                for event in self.get_recent_high_impact_news(hours=24)
+                for event in self.get_recent_news(hours=24)
             ]
         }
 

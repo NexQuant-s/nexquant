@@ -15,7 +15,7 @@ Caractéristiques :
 import logging
 import math
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 import pandas as pd
 
@@ -30,8 +30,7 @@ from superbot.broker.symbol_specs import (
     normalize_symbol_name,
     get_pip_size,
     calculate_lot_size as specs_calc_lot_size,
-    DEFAULT_SPECS,
-    is_rollover_period
+    DEFAULT_SPECS
 )
 from superbot.config import (
     MT5_LOGIN, MT5_PASSWORD, MT5_SERVER, MT5_PATH
@@ -187,34 +186,26 @@ class MT5Client(Broker):
         return list(MT5_CRYPTO_SYMBOLS)
 
     def get_default_instruments(self) -> List[str]:
-        """Instruments par défaut (Matières Premières & Forex)."""
-        """Instruments par défaut en semaine (Matières Premières & 5 Devises Majeures)."""
+        """Instruments par défaut (Matières Premières & Forex), sans doublons."""
         return [
             "XAUUSD",   # Or
+            "XAGUSD",   # Argent
             "XTIUSD",   # Pétrole WTI
+            "XBRUSD",   # Pétrole Brent
+            "XNGUSD",   # Gaz naturel
             "EURUSD",   # Euro / Dollar
             "GBPUSD",   # Livre / Dollar
             "USDJPY",   # Dollar / Yen
             "AUDUSD",   # Dollar Australien / Dollar
             "USDCAD",   # Dollar / Dollar Canadien
             "USDCHF",   # Dollar / Franc Suisse
-            "EURUSD",
-            "GBPUSD",
             "EURGBP",
             "EURJPY",
-            "USDJPY",
-            "XAUUSD",
-            "XAGUSD",
-            "XTIUSD",
-            "XBRUSD",
-            "XNGUSD",
         ]
 
     def get_default_news_assets(self) -> List[str]:
-        """Actives surveillés pour les actualités macroéconomiques."""
-        return ["USD", "EUR", "GBP", "JPY", "CAD", "AUD", "GOLD", "OIL"]
         """Actifs surveillés pour les actualités macroéconomiques."""
-        return ["USD", "EUR", "GBP", "JPY", "GOLD", "OIL"]
+        return ["USD", "EUR", "GBP", "JPY", "CAD", "AUD", "GOLD", "OIL"]
 
     def get_balance(self) -> float:
         """Retourne le solde du compte (balance)."""
@@ -290,7 +281,13 @@ class MT5Client(Broker):
             return pd.DataFrame()
 
         df = pd.DataFrame(rates)
+        # NB : index en HEURE SERVEUR MT5 (étiquetée UTC). Volontaire : minuit serveur = clôture
+        # de New York, ce qui donne des bougies journalières propres pour les pivots
+        # (resample('D')). La colonne `server_utc_offset_s` permet aux logiques horaires
+        # (LondonBreakout, range asiatique) de retrouver l'heure UTC réelle
+        # (voir knowledge_base.utc_bar_times).
         df['time'] = pd.to_datetime(df['time'], unit='s', utc=True)
+        df['server_utc_offset_s'] = self._server_utc_offset_seconds()
         df = df.set_index('time')
         df = df.rename(columns={
             "open": "open",
@@ -299,7 +296,7 @@ class MT5Client(Broker):
             "close": "close",
             "tick_volume": "volume"
         })
-        return df[['open', 'high', 'low', 'close', 'volume']]
+        return df[['open', 'high', 'low', 'close', 'volume', 'server_utc_offset_s']]
 
     def get_symbol_info(self, symbol: str) -> Dict[str, Any]:
         """Récupère les spécifications contractuelles exactes du symbole MT5."""
@@ -628,8 +625,6 @@ class MT5Client(Broker):
             if sl > 0 and price - sl < stops_level:
                 sl = round(price - min_offset, digits)
                 log.info(f"SL d'achat ajusté dynamiquement sous le prix actuel: {sl}")
-            elif sl > 0 and price - sl < stops_level:
-                sl = round(price - stops_level, digits)
             if tp > 0 and tp - price < stops_level:
                 tp = round(price + stops_level, digits)
         elif side_upper in ["SELL", "SHORT"]:
@@ -642,8 +637,6 @@ class MT5Client(Broker):
             if sl > 0 and sl - price < stops_level:
                 sl = round(price + min_offset, digits)
                 log.info(f"SL de vente ajusté dynamiquement au-dessus du prix actuel: {sl}")
-            elif sl > 0 and sl - price < stops_level:
-                sl = round(price + stops_level, digits)
             if tp > 0 and price - tp < stops_level:
                 tp = round(price - stops_level, digits)
 
@@ -669,7 +662,7 @@ class MT5Client(Broker):
         }
 
         log.info(f"Envoi ordre MT5 : {side_upper} {amount_lots} {symbol} @ {price:.5f} (SL: {sl:.5f}, TP: {tp:.5f})")
-        result = self._call_api(lambda: mt5.order_send(request), None, idempotent=False)
+        result = self._call_api(mt5.order_send, None, request, idempotent=False)
 
         # Retry avec mode de remplissage alternatif si rejeté pour fill type
         if result is not None and getattr(result, "retcode", 0) == 10030:  # TRADE_RETCODE_INVALID_FILL
@@ -678,7 +671,7 @@ class MT5Client(Broker):
             for alt in alt_modes:
                 if alt != fill_mode:
                     request["type_filling"] = alt
-                    result = self._call_api(lambda: mt5.order_send(request), None, idempotent=False)
+                    result = self._call_api(mt5.order_send, None, request, idempotent=False)
                     if result and result.retcode == mt5.TRADE_RETCODE_DONE:
                         break
 
@@ -748,7 +741,7 @@ class MT5Client(Broker):
                 "sl": float(pos_sl) if pos_sl > 0 else 0.0,
                 "tp": float(pos_tp) if pos_tp > 0 else 0.0,
             }
-            result = self._call_api(lambda: mt5.order_send(request), None, idempotent=False)
+            result = self._call_api(mt5.order_send, None, request, idempotent=False)
             if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
                 err_code = mt5.last_error()
                 log.error(f"Échec modification SL/TP #{ticket} ({symbol}): {result.comment if result else ''} (code: {err_code})")
@@ -800,7 +793,7 @@ class MT5Client(Broker):
             }
 
             log.info(f"Fermeture position MT5 #{ticket} sur {symbol} ({volume} lots {side})...")
-            result = self._call_api(lambda: mt5.order_send(request), None, idempotent=False)
+            result = self._call_api(mt5.order_send, None, request, idempotent=False)
 
             if result is not None and getattr(result, "retcode", 0) == 10030:
                 log.warning(f"Rejet filling mode {fill_mode} sur {symbol} pour fermeture. Tentative alternative...")
@@ -808,7 +801,7 @@ class MT5Client(Broker):
                 for alt in alt_modes:
                     if alt != fill_mode:
                         request["type_filling"] = alt
-                        result = self._call_api(lambda: mt5.order_send(request), None, idempotent=False)
+                        result = self._call_api(mt5.order_send, None, request, idempotent=False)
                         if result and result.retcode == mt5.TRADE_RETCODE_DONE:
                             break
 
@@ -854,46 +847,125 @@ class MT5Client(Broker):
                         "action": mt5.TRADE_ACTION_REMOVE,
                         "order": o.ticket,
                     }
-                    self._call_api(lambda: mt5.order_send(request), None)
+                    self._call_api(mt5.order_send, None, request)
             return True
         except Exception as e:
             log.warning(f"Erreur annulation ordres MT5: {e}")
             return False
 
+    # Codes DEAL_REASON_* de MT5 -> motif lisible de clôture
+    _DEAL_REASONS = {
+        0: "client", 1: "mobile", 2: "web", 3: "expert", 4: "sl", 5: "tp",
+        6: "stop_out", 7: "rollover", 8: "vmargin", 9: "split",
+    }
+    _DEAL_ENTRY_IN = 0
+    _DEAL_ENTRY_OUT = 1
+    _DEAL_ENTRY_OUT_BY = 3
+
+    def _server_utc_offset_seconds(self) -> int:
+        """
+        Décalage (secondes) entre l'heure du serveur MT5 et l'UTC.
+
+        MT5 horodate ticks et deals en heure serveur (ex: UTC+3 chez Fusion Markets en
+        été), exprimée comme un timestamp « epoch ». On le mesure sur le tick le plus
+        récent (arrondi à 30 min) ; un tick trop ancien (marché fermé) est ignoré et
+        la dernière mesure fiable est conservée.
+        """
+        now = time.time()
+        cached = getattr(self, "_tz_offset", None)
+        if cached is not None and now - getattr(self, "_tz_offset_checked_at", 0.0) < 3600:
+            return cached
+
+        latest_tick_time = 0
+        for probe in ("BTCUSD", "EURUSD", "XAUUSD"):
+            sym = self.normalize_symbol(probe)
+            # Un seul essai : un symbole sans tick ne doit pas déclencher reconnexion + attente
+            tick = self._call_api(lambda s=sym: mt5.symbol_info_tick(s), None, idempotent=False)
+            latest_tick_time = max(latest_tick_time, getattr(tick, "time", 0) or 0)
+
+        if latest_tick_time:
+            diff = latest_tick_time - now
+            rounded = int(round(diff / 1800.0)) * 1800
+            if abs(diff - rounded) <= 300 and abs(rounded) <= 14 * 3600:
+                if rounded != cached:
+                    log.info(f"Décalage heure serveur MT5 détecté : UTC{rounded / 3600:+.1f}h")
+                self._tz_offset = rounded
+                self._tz_offset_checked_at = now
+                return rounded
+
+        if cached is None:
+            log.warning("Décalage heure serveur MT5 indéterminé (aucun tick récent) — UTC supposé.")
+            return 0
+        return cached
+
+    def _server_ts_to_utc(self, server_ts: float, offset: int) -> datetime:
+        return datetime.fromtimestamp(server_ts - offset, timezone.utc)
+
+    def _summarize_position_deals(self, position_id: int, deals, offset: int) -> Optional[Dict[str, Any]]:
+        """Agrège les deals d'une position en un trade clôturé (None si encore ouverte)."""
+        entries = [d for d in deals if d.entry == self._DEAL_ENTRY_IN]
+        exits = [d for d in deals if d.entry in (self._DEAL_ENTRY_OUT, self._DEAL_ENTRY_OUT_BY)]
+        if not entries or not exits:
+            return None
+
+        entry_volume = sum(d.volume for d in entries)
+        exit_volume = sum(d.volume for d in exits)
+        last_exit = max(exits, key=lambda d: d.time)
+        pnl = sum(d.profit + d.commission + d.swap + getattr(d, "fee", 0.0) for d in deals)
+        return {
+            "symbol": entries[0].symbol,
+            # Le sens est celui du deal d'ouverture (DEAL_TYPE_BUY = 0)
+            "side": "buy" if entries[0].type == 0 else "sell",
+            "entry_price": sum(d.price * d.volume for d in entries) / entry_volume if entry_volume else 0.0,
+            "exit_price": sum(d.price * d.volume for d in exits) / exit_volume if exit_volume else 0.0,
+            "pnl": pnl,
+            "size": exit_volume,
+            "timestamp": self._server_ts_to_utc(last_exit.time, offset),
+            "open_time": self._server_ts_to_utc(min(d.time for d in entries), offset),
+            "close_reason": self._DEAL_REASONS.get(last_exit.reason, str(last_exit.reason)),
+            "ticket": last_exit.ticket,
+            "position_id": int(position_id),
+            "status": "closed",
+        }
+
+    def get_closed_position(self, position_id: int) -> Optional[Dict[str, Any]]:
+        """Retourne le trade clôturé correspondant exactement au ticket de position MT5."""
+        if not mt5 or not position_id:
+            return None
+        try:
+            deals = self._call_api(lambda: mt5.history_deals_get(position=int(position_id)), None)
+            if not deals:
+                return None
+            return self._summarize_position_deals(position_id, deals, self._server_utc_offset_seconds())
+        except Exception as e:
+            log.error(f"Erreur récupération des deals de la position {position_id} : {e}")
+            return None
+
     def get_trade_history(self, days: int = 30) -> List[Dict[str, Any]]:
-        """Récupère l'historique complet des trades clôturés depuis MT5."""
+        """Récupère l'historique des positions clôturées (une ligne par position, horodatage UTC)."""
         if not mt5:
             return []
         try:
-            from_date = datetime.now(timezone.utc) - timedelta(days=days)
-            to_date = datetime.now(timezone.utc)
+            offset = self._server_utc_offset_seconds()
+            now = time.time()
+            # La fenêtre est exprimée en heure serveur, comme les deals MT5.
+            from_date = datetime.fromtimestamp(now + offset - days * 86400, timezone.utc)
+            to_date = datetime.fromtimestamp(now + offset + 3600, timezone.utc)
 
             deals = self._call_api(lambda: mt5.history_deals_get(from_date, to_date), None)
-            if deals is None:
+            if not deals:
                 return []
 
-            trades = []
-            pos_entries = {}
+            by_position: Dict[int, list] = {}
             for deal in deals:
-                if deal.entry == 0 and deal.symbol:  # ENTRY
-                    pos_entries[deal.position_id] = deal.price
+                if deal.symbol and deal.position_id:
+                    by_position.setdefault(deal.position_id, []).append(deal)
 
-            for deal in deals:
-                if deal.entry == 1 and deal.symbol:  # EXIT
-                    side = "buy" if deal.type == 1 else "sell"
-                    pnl = deal.profit + deal.commission + deal.swap + deal.fee
-                    entry_p = pos_entries.get(deal.position_id, 0.0)
-                    trades.append({
-                        "symbol": deal.symbol,
-                        "side": side,
-                        "entry_price": entry_p,
-                        "exit_price": deal.price,
-                        "pnl": pnl,
-                        "size": deal.volume,
-                        "timestamp": datetime.fromtimestamp(deal.time, timezone.utc),
-                        "ticket": deal.ticket,
-                        "position_id": deal.position_id,
-                    })
+            trades = []
+            for position_id, pos_deals in by_position.items():
+                trade = self._summarize_position_deals(position_id, pos_deals, offset)
+                if trade:
+                    trades.append(trade)
 
             trades.sort(key=lambda x: x["timestamp"], reverse=True)
             return trades

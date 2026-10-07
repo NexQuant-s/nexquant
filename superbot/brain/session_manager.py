@@ -24,7 +24,7 @@ Chaque session a des règles spécifiques :
 
 import logging
 import threading
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List, Tuple
 
 log = logging.getLogger("nexquant.session_manager")
@@ -185,8 +185,8 @@ class SessionManager:
         try:
             from superbot.db.database import get_db
             self._db = get_db()
-        except Exception:
-            pass
+        except Exception as _exc:
+            log.debug(f"Erreur ignorée (non bloquante) : {_exc}")
 
         # Initialiser la session courante
         self._update_current_session()
@@ -247,6 +247,20 @@ class SessionManager:
 
     def _close_current_session(self):
         """Clôture la session courante et enregistre les stats."""
+        target = self.daily_target_eur * self._current_session.get('pnl_target_pct', 0.2)
+        learner = getattr(self.bot, 'performance_learner', None) if self.bot else None
+        if learner is not None:
+            # Débrief post-session (profils symboles, blocage de stratégies) — n'était jamais appelé
+            try:
+                started = self._session_started_at
+                trades = [t for t in getattr(learner, '_session_trades', [])
+                          if not started or str(t.get('timestamp', '')) >= started.isoformat()]
+                learner.post_session_debrief({
+                    'trades': trades, 'pnl_total': self._session_pnl,
+                    'pnl_target': target, 'session_name': self._current_session_name,
+                })
+            except Exception as e:
+                log.debug(f"Débrief post-session impossible : {e}")
         if not self._session_id or not self._db:
             return
         try:
@@ -383,16 +397,18 @@ class SessionManager:
 
         # 2. En Semaine : Interdiction de la crypto (réservée au weekend) et devises hors 5 majeures
         if is_crypto:
-            return False, f"Crypto réservée au week-end (en semaine, focus matières premières et 5 majeures FX)"
+            return False, "Crypto réservée au week-end (en semaine, focus matières premières et 5 majeures FX)"
         if not (is_commodity or is_allowed_forex):
             return False, f"{symbol} non autorisé : le bot surveille uniquement les matières premières et EURUSD, GBPUSD, EURGBP, EURJPY, USDJPY en semaine."
 
         # 3. Vérification OFF_HOURS nocturne (faible liquidité)
         if self._current_session_name == "OFF_HOURS":
-            from superbot.broker.mt5_client import _detect_asset_class_mt5
-            asset_class = _detect_asset_class_mt5(symbol)
-            if asset_class not in ('crypto', 'commodity'):
-                return False, f"OFF_HOURS : seulement crypto/commodity autorisés, pas {symbol}"
+            # Matières premières autorisées (l'ancien test comparait la classe à 'commodity' alors
+            # que get_asset_class renvoie 'commodity_gold'… : l'or était refusé à tort), sauf
+            # pendant le rollover interbancaire (21h55-23h05 UTC) où les spreads explosent.
+            from superbot.broker.symbol_specs import is_rollover_period
+            if is_rollover_period():
+                return False, f"OFF_HOURS : rollover interbancaire (21h55-23h05 UTC), pas de nouveau trade sur {symbol}"
             if not (is_commodity or norm in ("XAUUSD", "GOLD")):
                 return False, f"OFF_HOURS : liquidité réduite, seules matières premières autorisées (pas {symbol})"
 
@@ -409,8 +425,8 @@ class SessionManager:
         if self._db:
             try:
                 self._db.update_daily_achievement(self._daily_pnl)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log.debug(f"Erreur ignorée (non bloquante) : {_exc}")
 
         log.info(
             f"📈 Trade enregistré : PnL={pnl:+.2f}€ | "
@@ -421,25 +437,14 @@ class SessionManager:
 
     def _compute_daily_target(self, balance: float) -> float:
         """
-        Calcule l'objectif journalier adapté au solde.
+        Objectif journalier = DAILY_TARGET_PCT % du solde (2 % par défaut).
 
-        Règles V3 :
-          - ≥ 5000€ : cible 5% du solde (agressif)
-          - ≥ 1000€ : 200€ fixe (standard)
-          - ≥ 500€  : 100€ (prudent)
-          - ≥ 200€  : 50€ (micro)
-          - < 200€  : 10% du solde
+        L'ancien barème fixe (200€ dès 1000€, 100€ dès 500€) représentait 10 à 20 %
+        du compte par jour : irréaliste avec 1 % de risque par trade et trompeur dans
+        les rapports et le suivi d'avancement.
         """
-        if balance >= 5000:
-            return round(balance * 0.05, 2)
-        elif balance >= 1000:
-            return 200.0
-        elif balance >= 500:
-            return 100.0
-        elif balance >= 200:
-            return 50.0
-        else:
-            return round(balance * 0.10, 2)
+        from superbot.config import DAILY_TARGET_PCT
+        return round(max(balance, 0.0) * DAILY_TARGET_PCT / 100.0, 2)
 
     def get_daily_progress(self) -> Dict[str, Any]:
         """Retourne l'avancement vers l'objectif journalier."""
@@ -469,14 +474,23 @@ class SessionManager:
             risk_mult = session.get('risk_multiplier', 1.0)
             pos_ratio = session.get('max_positions_ratio', 1.0)
 
-            # Appliquer risk_multiplier au RiskManager
+            score_mult = session.get('score_multiplier', 1.0)
+            adapted_score = None
+            rc = getattr(self.bot, 'runtime_config', None)
+            if rc is not None:
+                # Source unique : RuntimeConfig applique le multiplicateur de risque et le décalage
+                # de score (auparavant écrits ici directement puis écrasés par RuntimeConfig.apply).
+                base_score = rc.score_min
+                adapted_score = max(base_score, int(round(base_score * score_mult)))
+                rc.set_session_multipliers(risk_multiplier=risk_mult, score_offset=adapted_score - base_score)
+
             if hasattr(self.bot, 'risk_manager') and self.bot.risk_manager:
                 rm = self.bot.risk_manager
-                base_risk = getattr(rm, '_base_risk_pct', rm.RISK_PCT)
-                # Sauvegarder le risque de base une seule fois pour éviter la dérive
-                if not hasattr(rm, '_base_risk_pct'):
-                    rm._base_risk_pct = rm.RISK_PCT
-                rm.RISK_PCT = round(rm._base_risk_pct * risk_mult, 3)
+                if rc is None:
+                    # Repli (bots simulés sans RuntimeConfig)
+                    if not hasattr(rm, '_base_risk_pct'):
+                        rm._base_risk_pct = rm.RISK_PCT
+                    rm.RISK_PCT = round(rm._base_risk_pct * risk_mult, 3)
 
                 # Adapter MAX_OPEN_POSITIONS selon la session
                 base_max = getattr(rm, '_base_max_positions', rm.MAX_OPEN_POSITIONS)
@@ -484,14 +498,12 @@ class SessionManager:
                     rm._base_max_positions = base_max
                 rm.MAX_OPEN_POSITIONS = max(3, int(round(base_max * pos_ratio)))
 
-            # Adapter le score_min de la stratégie
-            adapted_score = None
-            if hasattr(self.bot, 'strategy') and self.bot.strategy:
+            # Repli : adapter directement le score_min de la stratégie (bots simulés sans RuntimeConfig)
+            if rc is None and hasattr(self.bot, 'strategy') and self.bot.strategy:
                 strat = self.bot.strategy
                 base_score = getattr(strat, '_base_score_min', getattr(strat, 'score_min', 6))
                 if not hasattr(strat, '_base_score_min'):
                     strat._base_score_min = getattr(strat, 'score_min', 6)
-                score_mult = session.get('score_multiplier', 1.0)
                 adapted_score = max(base_score, int(round(base_score * score_mult)))
                 strat.score_min = adapted_score
 

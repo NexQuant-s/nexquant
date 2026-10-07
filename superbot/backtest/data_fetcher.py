@@ -13,7 +13,6 @@ Usage :
     # Force le re-téléchargement même si le cache existe
     df = fetcher.fetch('BTCUSDT', '1h', start='2024-01-01', force_refresh=True)
 """
-import os
 import logging
 import hashlib
 from datetime import datetime, timedelta, timezone
@@ -149,7 +148,7 @@ class DataFetcher:
             df = self._download_from_binance_public(symbol, timeframe, start_dt, end_dt)
             if df is not None and not df.empty:
                 return df
-            log.warning(f"[DataFetcher] Binance public indisponible — fallback broker natif.")
+            log.warning("[DataFetcher] Binance public indisponible — fallback broker natif.")
 
         # 2. Broker natif NexQuant
         if self.broker_type in ('binance', 'alpaca', 'mt5'):

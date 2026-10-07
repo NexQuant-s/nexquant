@@ -2,13 +2,12 @@
 Test d'intégration End-to-End complet pour NexQuant SuperBot (Forex & Commodities MT5).
 """
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 import pandas as pd
 import numpy as np
 from types import SimpleNamespace
 
 from superbot.orchestrator import SuperBot
-from superbot.broker.mt5_client import MT5Client
 from superbot.strategy.strategy import TradingStrategy
 
 

@@ -2,7 +2,6 @@ WEBHOOK_ENABLED = False  # Rétro-compatibilité : Webhook désactivé (architec
 """
 ╔══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╩
 """
-import asyncio
 import signal
 import sys
 import os
@@ -44,12 +43,12 @@ class SafeStreamWrapper:
                 safe_data = data.encode(encoding, errors='backslashreplace').decode(encoding)
                 self.stream.write(safe_data)
                 self.stream.flush()
-            except Exception:
+            except Exception:  # noqa: S110 — pas de log ici : le logging écrit sur ce flux (récursion)
                 pass
     def flush(self):
         try:
             self.stream.flush()
-        except Exception:
+        except Exception:  # noqa: S110 — pas de log ici : le logging écrit sur ce flux (récursion)
             pass
     def __getattr__(self, name):
         return getattr(self.stream, name)
@@ -58,21 +57,21 @@ sys.stdout = SafeStreamWrapper(sys.stdout)
 sys.stderr = SafeStreamWrapper(sys.stderr)
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Any, Set
+from typing import Dict, List, Optional
 import threading
 import traceback
 
 # Importer les modules du SuperBot
 from superbot.config import (
     BROKER_TYPE, ALLOW_LIVE_TRADING, GRANULARITY,
-    LOG_LEVEL, LOG_FILE, ENABLE_DASHBOARD,
+    LOG_LEVEL, LOG_FILE, LOG_DIR, REPORTS_DIR, ENABLE_DASHBOARD,
     
     # Risk Management
     RISK_PCT, MAX_DAILY_LOSS_PCT, MAX_MONTHLY_LOSS_PCT, MAX_OPEN_POSITIONS,
     KELLY_FRACTION, MIN_TRADES_FOR_KELLY, SL_ATR_MULT, TP_ATR_MULT,
     TRAIL_ATR_MULT, TRAIL_ACTIVATE_ATR_MULT, BE_ATR_MULT, MIN_POSITION_SIZE, MAX_POSITION_SIZE,
     COOLDOWN_SECONDS,
-    MAX_FOREX_CURRENCY_EXPOSURE, MAX_SPREAD_PIPS, BE_DYN_RR, BE_DYN_RR_RATIO,
+    BE_DYN_RR, BE_DYN_RR_RATIO, ENABLED_STRATEGIES, SIGNAL_ON_CLOSED_BAR,
     # Seuils de drawdown et perte maximale journalière
     MAX_DAILY_LOSS_AMOUNT,
     DRAWDOWN_THRESH_1, DRAWDOWN_THRESH_2, DRAWDOWN_REDUCE_5PCT, DRAWDOWN_REDUCE_10PCT,
@@ -89,7 +88,7 @@ from superbot.config import (
     EMA_FAST_FOREX, EMA_SLOW_FOREX, ADX_TREND_FOREX, SCORE_MIN_FOREX,
     SL_ATR_MULT_FOREX, TP_ATR_MULT_FOREX, FOREX_NEWS_AVOID_MINUTES,
     # News & Sentiment
-    NEWS_ASSETS, NEWS_UPDATE_INTERVAL, NEWS_AVOIDANCE_BEFORE, NEWS_AVOIDANCE_AFTER,
+    NEWS_UPDATE_INTERVAL, NEWS_AVOIDANCE_BEFORE, NEWS_AVOIDANCE_AFTER,
     NEWS_RISK_REDUCTION_FACTOR, NEWS_HIGH_IMPACT_ONLY, FEAR_GREED_EXTREME_FEAR,
     FEAR_GREED_EXTREME_GREED,
 
@@ -127,12 +126,6 @@ try:
 except ImportError:
     DASHBOARD_AVAILABLE = False
     log = None  # Sera initialisé plus bas
-
-try:
-    from superbot.logger import setup_logging
-    LOGGER_AVAILABLE = True
-except ImportError:
-    LOGGER_AVAILABLE = False
 
 # Configurer le logging
 import logging
@@ -202,7 +195,9 @@ class SuperBot:
         self.weekday_instruments: List[str] = []
         self.crypto_instruments: List[str] = []
         self.news_assets: List[str] = []
-        self.initial_balance: float = 10000.0
+        # 0.0 = solde inconnu (ex: échec IPC MT5 au démarrage). Ne jamais utiliser une
+        # valeur fictive : elle fausserait l'objectif journalier et le performance_log.
+        self.initial_balance: float = 0.0
 
         # Paramètres adaptatifs — source unique de vérité (RuntimeConfig).
         # adaptive_risk_pct / adaptive_score_min délèguent ici via des propriétés
@@ -217,7 +212,7 @@ class SuperBot:
         # Persistance complète des états
         from superbot.state import StateManager
         import os
-        state_file = os.path.join(root_dir, 'superbot', 'logs', f'state_{self.active_broker_type}.json')
+        state_file = os.path.join(str(LOG_DIR), f'state_{self.active_broker_type}.json')
         self.state_manager = StateManager(filepath=state_file, ttl_hours=24)
         self.state_manager.load_state()
 
@@ -261,8 +256,8 @@ class SuperBot:
         if saved_date_str:
             try:
                 same_day = (datetime.fromisoformat(saved_date_str).date() == self.session_date)
-            except Exception:
-                pass
+            except Exception as _exc:
+                log.debug(f"Erreur ignorée (non bloquante) : {_exc}")
                 
         if same_day:
             self.is_paused = self.state_manager.is_paused
@@ -341,6 +336,7 @@ class SuperBot:
 
         # Initialiser les composants broker/stratégie
         self._initialize_components()
+        self._init_daily_target()
 
     # ─── Paramètres adaptatifs : source unique de vérité ─────────────────────
 
@@ -440,6 +436,7 @@ class SuperBot:
                 performance_learner=self.performance_learner,
                 knowledge_feeder=self.knowledge_feeder,
                 bot=self,
+                reports_dir=REPORTS_DIR,
             )
             if self.performance_learner:
                 self.performance_learner._report_generator = self.report_generator
@@ -448,17 +445,26 @@ class SuperBot:
         except Exception as e:
             log.warning(f"⚠️ ReportGenerator non disponible : {e}")
 
-        # Initialiser la DB journalière
-        if self.db and self.session_manager:
-            try:
-                balance = getattr(self, 'initial_balance', 0) or 0
-                target = self.session_manager._compute_daily_target(balance or self.BALANCE_TIER_MID)
-                self.db.set_daily_target(balance or self.BALANCE_TIER_MID, target)
-            except Exception:
-                pass
-
         self._brain_initialized = True
         log.info("✅ Brain V3 initialisé avec succès")
+
+    def _init_daily_target(self):
+        """
+        Objectif journalier initial, en % du solde réel. Appelé APRÈS
+        _initialize_components() : avant, le solde n'était pas encore lu et l'objectif
+        était calculé sur la valeur par défaut (10 000 €, objectif 500 €).
+        """
+        if not self.session_manager:
+            return
+        try:
+            balance = getattr(self, 'initial_balance', 0) or 0
+            if balance > 0:
+                target = self.session_manager._compute_daily_target(balance)
+                self.session_manager.daily_target_eur = target
+                if self.db:
+                    self.db.set_daily_target(balance, target)
+        except Exception as e:
+            log.debug(f"Initialisation de l'objectif journalier impossible : {e}")
 
 
     # ─── Builders des composants (extraits de _initialize_components) ─────────
@@ -562,6 +568,9 @@ class SuperBot:
             'SCORE_MIN': self.adaptive_score_min,
             'RISK_PCT': self.adaptive_risk_pct,
             'KELLY_FRACTION': KELLY_FRACTION,
+            'SL_ATR_MULT': SL_ATR_MULT,
+            'TP_ATR_MULT': TP_ATR_MULT,
+            'ENABLED_STRATEGIES': ENABLED_STRATEGIES,
             'EMA_FAST': EMA_FAST,
             'EMA_SLOW': EMA_SLOW,
             'EMA_TREND': EMA_TREND,
@@ -672,7 +681,7 @@ class SuperBot:
                 log.info(f"Le type de broker a changé de {self.active_broker_type} à {active_broker_type}. Réinitialisation du StateManager...")
                 self.active_broker_type = active_broker_type
                 from superbot.state import StateManager
-                state_file = os.path.join(root_dir, 'superbot', 'logs', f'state_{self.active_broker_type}.json')
+                state_file = os.path.join(str(LOG_DIR), f'state_{self.active_broker_type}.json')
                 self.state_manager = StateManager(filepath=state_file, ttl_hours=24)
                 self.state_manager.load_state()
                 self.failed_execution_cooldowns = self.state_manager.failed_execution_cooldowns
@@ -696,7 +705,7 @@ class SuperBot:
                     log.info(f"Solde initial détecté (fallback get_balance) : {self.initial_balance}")
                 except Exception as e2:
                     log.warning(f"⚠️  Impossible de récupérer le solde initial : {e2}")
-                    self.initial_balance = 10000.0
+                    self.initial_balance = 0.0
 
             # Déterminer les instruments selon le broker (clés spécifiques au broker en priorité)
             broker_type = active_broker_type
@@ -779,6 +788,9 @@ class SuperBot:
 
             # 4. Créer la stratégie de trading
             self.strategy = self._build_strategy(active_broker_type)
+            if self.strategy_engine:
+                # Les stratégies doivent tourner avec la config réelle (.env), pas leurs défauts
+                self.strategy_engine.configure(self.strategy.config)
             log.info("Stratégie de trading initialisée")
             # Exposer le config au niveau bot pour les filtres de l'executor
             self.config = self.strategy.config
@@ -808,7 +820,8 @@ class SuperBot:
             if ENABLE_DASHBOARD and DASHBOARD_AVAILABLE:
                 try:
                     dash_port = int(os.environ.get("DASHBOARD_PORT", 5000))
-                    self.dashboard = Dashboard(port=dash_port, host="0.0.0.0")
+                    # DASHBOARD_HOST=127.0.0.1 pour n'exposer le dashboard qu'en local (défaut : toutes interfaces)
+                    self.dashboard = Dashboard(port=dash_port, host=os.environ.get("DASHBOARD_HOST", "0.0.0.0"))
                     log.info(f"Dashboard initialisé sur le port {dash_port}")
                 except Exception as e:
                     log.warning(f"️  Impossible d'initialiser le dashboard : {e}")
@@ -1035,9 +1048,19 @@ class SuperBot:
             log.warning("️  Le bot est déjà en cours d'exécution")
             return
 
-        # 1.1 Garde-fou Live Trading
-        is_testnet = getattr(self.broker, 'testnet', True) or getattr(self.broker, 'account_type', 'PAPER') == 'PAPER'
-        if not is_testnet and not ALLOW_LIVE_TRADING:
+        # 1.1 Garde-fou Live Trading. MT5Client n'a pas d'attribut `testnet` : l'ancien test
+        # (getattr(..., 'testnet', True)) considérait donc TOUT compte comme démo. On se fie
+        # au type de compte renvoyé par le broker (MT5_REAL / MT5_DEMO).
+        is_live_account = False
+        try:
+            summary = self.broker.get_account_summary() or {}
+            is_live_account = str(summary.get('account_type', '')).upper() in ('MT5_REAL', 'REAL', 'LIVE')
+        except Exception as e:
+            log.warning(f"Type de compte indéterminé ({e}) — vérification via les attributs du broker.")
+        if not is_live_account:
+            is_live_account = not (getattr(self.broker, 'testnet', True)
+                                   or getattr(self.broker, 'account_type', 'PAPER') == 'PAPER')
+        if is_live_account and not ALLOW_LIVE_TRADING:
             log.error("🚨 TRADING LIVE DÉTECTÉ MAIS NON AUTORISÉ DANS .ENV (ALLOW_LIVE_TRADING=true manquant). CRASH PRÉVENTIF.")
             sys.exit(1)
 
@@ -1264,12 +1287,10 @@ class SuperBot:
                 except Exception as _se:
                     log.debug(f"SessionManager tick error: {_se}")
 
-            # ⚫ V3 : Vérification PerformanceLearner (blocage pertes consécutives)
             # ⚫ V3 : Vérification PerformanceLearner (pause 10 min après pertes consécutives)
             if self.performance_learner:
                 try:
                     if self.performance_learner.is_symbol_blocked(symbol):
-                        log.info(f"🚫 {symbol} bloqué par PerformanceLearner (3+ pertes consécutives)")
                         log.info(f"⏸️ [Pause 10 min] {symbol} temporairement suspendu suite à pertes consécutives (analyse post-mortem active)")
                         if getattr(self, 'report_generator', None):
                             self.report_generator.record_rejection_event(
@@ -1291,6 +1312,15 @@ class SuperBot:
                     # Ne pas chercher à ouvrir de nouvelles positions sur cet actif
                     return
 
+            # Signal sur bougie clôturée (comme le backtest) : la bougie en formation est exclue et chaque
+            # bougie n'est évaluée qu'une fois (sinon un signal intrabarre réévalué toutes les 15 s).
+            if SIGNAL_ON_CLOSED_BAR and len(df_with_indicators) > 1:
+                df_with_indicators = df_with_indicators.iloc[:-1]
+                bar_key = df_with_indicators.index[-1]
+                last_bars = self.__dict__.setdefault('_last_signal_bar', {})
+                if last_bars.get(symbol) == bar_key:
+                    return
+                last_bars[symbol] = bar_key
 
             # 3. Analyser le marché et générer un signal de trading (avec cache de cycle)
             strategy_start = time.time()
@@ -1350,7 +1380,9 @@ class SuperBot:
                 # 🧠 V3 : Enrichir le signal avec le régime Brain + StrategyEngine
                 try:
                     if self.regime_detector:
-                        asset_class = 'crypto' if 'BTC' in symbol or 'ETH' in symbol or 'BNB' in symbol else 'forex'
+                        # Même classe d'actif que TradingStrategy (sinon l'or était évalué avec les
+                        # seuils 'forex' et écrasait le régime calculé avec les seuils 'commodity_gold').
+                        asset_class = get_asset_class(symbol)
                         regime_result = self.regime_detector.detect(
                             df_with_indicators, symbol=symbol, asset_class=asset_class, store_in_db=False
                         )
@@ -1377,15 +1409,18 @@ class SuperBot:
                     if self.strategy_engine and self.session_manager:
                         sess = self.session_manager.get_current_session()
                         regime = signal_data.get('market_regime', 'ranging')
-                        asset_class = 'crypto' if 'BTC' in symbol or 'ETH' in symbol else 'forex'
                         best_strat, strat_conf = self.strategy_engine.select_best_strategy(
                             regime=regime,
                             session_name=sess.get('name', 'LONDON'),
-                            asset_class=asset_class,
+                            asset_class=get_asset_class(symbol),
                             symbol=symbol,
                             adx_value=float(df_with_indicators.iloc[-1].get('adx', 0) or 0),
                         )
-                        signal_data['strategy_used'] = best_strat
+                        # Ne jamais écraser la stratégie qui a réellement produit le signal
+                        # (sinon toutes les stats par stratégie sont mal attribuées).
+                        if signal_data.get('strategy_used') in (None, '', 'NONE'):
+                            signal_data['strategy_used'] = best_strat
+                        signal_data['preferred_strategy'] = best_strat
                         signal_data['strategy_confidence'] = strat_conf
 
                         # Ajuster le score_min selon le régime
@@ -1615,8 +1650,8 @@ class SuperBot:
             if not target_instruments and hasattr(self.broker, 'get_crypto_instruments'):
                 try:
                     target_instruments = list(self.broker.get_crypto_instruments())
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log.debug(f"Erreur ignorée (non bloquante) : {_exc}")
             for symbol in target_instruments:
                 # Exclure les symboles en blacklist AVANT de calculer leur score
                 sym_clean = symbol.replace('/', '').upper()
@@ -1802,7 +1837,13 @@ class SuperBot:
         current_currency = base_ccy if quote_ccy in ['JPY', 'CAD', 'CHF', 'AUD', 'NZD'] else quote_ccy
         
         if current_currency in ["USD", "SDT"]: # Handle USD and USDT
-            usd_to_eur_rate = 0.95
+            usd_to_eur_rate = 0.95  # repli si le cours EURUSD est indisponible
+            try:
+                eurusd = float(self.broker.get_current_price("EURUSD"))
+                if eurusd > 0:
+                    usd_to_eur_rate = 1.0 / eurusd
+            except Exception as e:
+                log.debug(f"Cours EURUSD indisponible pour la conversion de PnL : {e}")
             converted = converted * usd_to_eur_rate
             
         return converted
@@ -1916,7 +1957,7 @@ class SuperBot:
                     'initial_balance': self.initial_balance,
                     'equity':          float(acc_raw.get('equity') or bal),
                     'unrealized_pnl':  upnl,
-                    'pnl':             bal - self.initial_balance,
+                    'pnl':             bal - self.initial_balance if self.initial_balance > 0 else 0.0,
                     'open_positions':  int(acc_raw.get('open_positions', len(self.positions))),
                     'account_type':    acc_raw.get('account_type', 'PAPER'),
                     'broker':          BROKER_TYPE,
@@ -2114,10 +2155,8 @@ class SuperBot:
         def run_async():
             try:
                 best_params = self.walk_forward_optimizer.optimize(df)
-                self.strategy.config['SCORE_MIN'] = best_params['SCORE_MIN']
-                self.strategy.config['RSI_OB'] = best_params['RSI_OB']
-                self.strategy.config['ADX_TREND'] = best_params['ADX_TREND']
-                self.strategy.score_min = best_params['SCORE_MIN']
+                # Passe par RuntimeConfig (source unique) ; StrategyEngine applique ensuite
+                # max(SCORE_MIN du .env, cette valeur) : la calibration ne peut que durcir le seuil.
                 self.adaptive_score_min = best_params['SCORE_MIN']
                 log.info(f"Paramètres de stratégie mis à jour par Walk-Forward : {best_params}")
             except Exception as e:

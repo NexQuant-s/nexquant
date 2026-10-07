@@ -72,19 +72,11 @@ def run_main_loop(bot):
     log.info("Démarrage de la boucle principale de trading")
 
     cycle_count = 0
-    last_news_update = 0
-    news_update_interval = 300  # 5 minutes
 
     # ── Watchdog de cycle (fix freeze 24/07/2026) ─────────────────────────────
     # Initialiser le heartbeat avant de lancer le watchdog
     bot._last_cycle_heartbeat = time.time()
     bot._post_freeze_cooldown_cycles = 0
-    try:
-        from superbot.config import CYCLE_WATCHDOG_TIMEOUT, POST_FREEZE_THRESHOLD_SECONDS, POST_FREEZE_COOLDOWN_CYCLES as _PF_CYCLES
-    except ImportError:
-        CYCLE_WATCHDOG_TIMEOUT = 300
-        POST_FREEZE_THRESHOLD_SECONDS = 120
-        _PF_CYCLES = 2
     _start_cycle_watchdog(bot, watchdog_timeout=CYCLE_WATCHDOG_TIMEOUT)
 
     # ⚡ V3 : Lire CYCLE_TIME et les paramètres parallèles depuis la config du bot
@@ -217,8 +209,8 @@ def run_main_loop(bot):
                         progress = sm.get_daily_progress()
                         daily_achieved = progress.get('achieved_eur', 0.0)
                         daily_target = progress.get('target_eur', 0.0)
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        log.debug(f"Erreur ignorée (non bloquante) : {_exc}")
 
                 total_trades = bot.stats.get('total_trades', 0) if bot.stats else 0
                 win_trades = bot.stats.get('win_trades', 0) if bot.stats else 0
@@ -295,7 +287,7 @@ def run_main_loop(bot):
                         if bal > 0.0:
                             equity = bal
                     if equity > 0.0:
-                        pnl_total = equity - bot.initial_balance
+                        pnl_total = equity - bot.initial_balance if bot.initial_balance > 0 else 0.0
                         bot.telemetry.push_equity(equity=equity, pnl_total=pnl_total, drawdown=0.0)
                     else:
                         log.warning("⚠️ Impossible de pousser l'équité à la télémétrie : valeur invalide ou nulle.")
@@ -395,9 +387,12 @@ def run_main_loop(bot):
                 # 🧠 V3 : Reset journalier du SessionManager et PerformanceLearner
                 if getattr(bot, 'session_manager', None):
                     try:
-                        balance = getattr(bot, '_cached_balance', 0.0) or getattr(bot, 'initial_balance', 10000.0)
-                        bot.session_manager.reset_daily(balance)
-                        log.info(f"🧠 SessionManager reset journalier | balance={balance:.2f}€")
+                        balance = getattr(bot, '_cached_balance', 0.0) or getattr(bot, 'initial_balance', 0.0)
+                        if balance <= 0:
+                            balance = float(bot.broker.get_balance())
+                        if balance > 0:
+                            bot.session_manager.reset_daily(balance)
+                            log.info(f"🧠 SessionManager reset journalier | balance={balance:.2f}€")
                     except Exception as _e:
                         log.debug(f"SessionManager reset error: {_e}")
                 
@@ -406,6 +401,12 @@ def run_main_loop(bot):
                         bot.risk_manager.reset_daily_stats()
                     except Exception as _e:
                         log.debug(f"RiskManager reset error: {_e}")
+
+                if getattr(bot, 'performance_learner', None):
+                    try:
+                        bot.performance_learner.reset_daily()  # fin du mode défensif / protection
+                    except Exception as _e:
+                        log.debug(f"PerformanceLearner reset error: {_e}")
 
             # 🧠 V3 : Analyse PRÉ-SESSION périodique (toutes les heures)
             if (getattr(bot, 'performance_learner', None) and
@@ -429,7 +430,7 @@ def run_main_loop(bot):
                     progress = sm.get_daily_progress()
                     pnl = progress.get('achieved_eur', 0)
                     target = progress.get('target_eur', 200)
-                    balance = getattr(bot, '_cached_balance', 0.0) or getattr(bot, 'initial_balance', 10000.0)
+                    balance = getattr(bot, '_cached_balance', 0.0) or getattr(bot, 'initial_balance', 0.0)
                     actions = bot.performance_learner.mid_session_check(pnl, target, balance)
                     if actions.get('action'):
                         log.info(f"🔄 Mid-session : {actions['action']} | {progress['achieved_eur']:.1f}€/{target:.1f}€ ({progress['achievement_pct']:.0f}%)")
@@ -442,14 +443,17 @@ def run_main_loop(bot):
                 try:
                     if getattr(bot, 'session_manager', None):
                         log.info(f"📊 {bot.session_manager.get_session_summary()}")
-                    if getattr(bot, 'db', None):
-                        bal = getattr(bot, '_cached_balance', 0.0) or getattr(bot, 'initial_balance', 0.0)
+                    bal = getattr(bot, '_cached_balance', 0.0) or getattr(bot, 'initial_balance', 0.0)
+                    if bal > 0 and getattr(bot, 'initial_balance', 0.0) <= 0:
+                        # Solde inconnu au démarrage (échec MT5) : récupéré depuis le cache du cycle.
+                        bot.initial_balance = bal
+                    if getattr(bot, 'db', None) and bal > 0:
                         sess = getattr(bot, 'session_manager', None)
                         bot.db.log_performance({
                             'balance': bal,
                             'equity': bal,
                             'daily_pnl': sess.get_daily_progress().get('achieved_eur', 0) if sess else 0,
-                            'daily_target': getattr(bot, 'DAILY_TARGET_EUR', 200),
+                            'daily_target': sess.daily_target_eur if sess else getattr(bot, 'DAILY_TARGET_EUR', 0),
                             'open_positions': len(getattr(bot, 'positions', {})),
                             'session_name': sess.get_current_session().get('name', '') if sess else '',
                         })
@@ -466,10 +470,10 @@ def run_main_loop(bot):
                         try:
                             balance = bot.broker.get_balance()
                         except Exception:
-                            balance = getattr(bot, "initial_balance", 10000.0)
+                            balance = getattr(bot, "initial_balance", 0.0)
                     metrics = bot.risk_manager.get_risk_metrics(balance)
                     if metrics:
-                        log.info(f"📊 [Risk Metrics] WinRate: {metrics.get('win_rate', 0):.1%} | Profit Factor: {metrics.get('profit_factor', 0):.2f} | Drawdown: {metrics.get('current_drawdown_pct', 0):.2f}%")
+                        log.info(f"📊 [Risk Metrics] WinRate: {metrics.get('win_rate', 0):.1%} | Profit Factor: {metrics.get('profit_factor', 0):.2f} | Drawdown: {metrics.get('drawdown_pct', 0):.2f}%")
 
             with bot._state_lock:
                 bot.stats['cycles_completed'] = cycle_count
@@ -493,7 +497,6 @@ def run_main_loop(bot):
                 except Exception as e:
                     log.error(f"Erreur cycle TSMOM : {e}")
 
-            # ── 🔍 Scan intraday (signaux normaux sur tous les instruments) ────
             # ── 🔍 Scan intraday (instruments actifs : week-end = crypto, semaine = matières 1ères + 5 majeures) ────
             if hasattr(bot, 'get_active_trading_instruments'):
                 scanned_instruments = list(bot.get_active_trading_instruments())
@@ -533,19 +536,8 @@ def run_main_loop(bot):
                         for sym in scanned_instruments
                         if bot.running and not bot.shutdown_event.is_set()
                     }
-                    for future in as_completed(
-                        future_to_sym,
-                        timeout=symbol_timeout * len(scanned_instruments) + 10
-                    ):
-                        sym = future_to_sym[future]
-                        try:
-                            future.result(timeout=symbol_timeout)
-                        except FuturesTimeoutError:
-                            log.warning(f"⏱️ Timeout ({symbol_timeout}s) pour {sym}")
-                        except Exception as e:
-                            log.error(f"Erreur traitement {sym}: {e}")
-                            with bot._state_lock:
-                                bot.stats['errors_count'] += 1
+                    # Une seule passe sur les résultats (l'ancienne double boucle comptait
+                    # chaque erreur deux fois et laissait fuir le timeout global).
                     try:
                         for future in as_completed(
                             future_to_sym,
@@ -594,10 +586,10 @@ def run_main_loop(bot):
                     if bot.risk_manager:
                         balance = bot.risk_manager.current_balance
                         if balance <= 0.0:
-                            balance = bot._cached_balance if bot._cached_balance > 0 else getattr(bot, "initial_balance", 10000.0)
+                            balance = bot._cached_balance if bot._cached_balance > 0 else getattr(bot, "initial_balance", 0.0)
                         metrics = bot.risk_manager.get_risk_metrics(balance)
                         if metrics:
-                            bot.prometheus.bot_drawdown_pct.set(metrics.get("current_drawdown_pct", 0.0))
+                            bot.prometheus.bot_drawdown_pct.set(metrics.get("drawdown_pct", 0.0))
                             
                     if bot._cached_balance > 0:
                         bot.prometheus.bot_balance.set(bot._cached_balance)

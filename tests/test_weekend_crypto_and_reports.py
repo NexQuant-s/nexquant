@@ -1,11 +1,10 @@
 import os
 import tempfile
-import pytest
 from datetime import datetime, timezone
 import pandas as pd
 import numpy as np
 
-from superbot.broker.symbol_specs import is_weekend_market, get_asset_class, MT5_CRYPTO_SYMBOLS
+from superbot.broker.symbol_specs import is_weekend_market
 from superbot.brain.session_manager import SessionManager
 from superbot.brain.strategy_engine import StrategyEngine
 from superbot.brain.report_generator import ReportGenerator

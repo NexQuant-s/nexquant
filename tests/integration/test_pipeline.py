@@ -112,6 +112,9 @@ def _signal():
 
 def _build_bot(monkeypatch, tmp_path, broker):
     monkeypatch.setattr("superbot.config.TRADE_LOG_FILE", str(tmp_path / "trades.jsonl"))
+    # Les bougies synthétiques montent linéairement : l'entrée se fait au plus haut et
+    # serait (à juste titre) rejetée par le filtre d'épuisement, hors sujet ici.
+    monkeypatch.setattr("superbot.config.ENTRY_EXHAUSTION_FILTER", False)
     # Rendre le filtre nocturne déterministe (indépendant de l'heure du run).
     monkeypatch.setattr(
         "superbot.components.signal_executor._is_night_session",

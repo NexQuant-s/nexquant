@@ -178,7 +178,6 @@ class BacktestReport:
         """
         try:
             import matplotlib.pyplot as plt
-            import matplotlib.dates as mdates
             import pandas as pd
         except ImportError:
             log.warning("[BacktestReport] matplotlib non installé. pip install matplotlib")
@@ -207,10 +206,6 @@ class BacktestReport:
         ax1.fill_between(range(len(equity)), equity.values, self.results.initial_balance,
                          where=equity.values < self.results.initial_balance,
                          alpha=0.15, color='#F44336')
-
-        # Marquer les trades sur la courbe
-        for t in self.results.trades:
-            color = '#00C853' if t.pnl > 0 else '#F44336'
 
         ax1.set_ylabel("Capital ($)", fontsize=10)
         ax1.legend(loc='upper left', fontsize=9)

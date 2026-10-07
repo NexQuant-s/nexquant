@@ -117,6 +117,15 @@ TRAIL_ATR_MULT = float(os.getenv("TRAIL_ATR_MULT", "1.5"))  # Trailing stop dist
 TRAIL_ACTIVATE_ATR_MULT = float(os.getenv("TRAIL_ACTIVATE_ATR_MULT", "2.0"))
 BE_ATR_MULT = float(os.getenv("BE_ATR_MULT", "1.0"))  # Breakeven activation threshold
 
+# Stratégies actives (vide = toutes). Ex. : ENABLED_STRATEGIES=MURPHY_TREND
+# Étude du 07/10/2026 (3 ans H1) : seul MURPHY_TREND a un avantage ; ELDER et UNIFIED_ALPHA perdent.
+ENABLED_STRATEGIES = [s.strip().upper() for s in os.getenv("ENABLED_STRATEGIES", "").split(",") if s.strip()]
+# true = l'ordre live utilise le SL/TP calculé par la stratégie (comme le backtest) au lieu du
+# SL/TP ATR × régime de stop_manager. L'avantage de Murphy vient de son SL Donchian (PF ≈ 1,0 sans).
+USE_STRATEGY_SL_TP = os.getenv("USE_STRATEGY_SL_TP", "false").lower() == "true"
+# true = signaux calculés sur la dernière bougie CLÔTURÉE, une fois par bougie (parité avec le backtest)
+SIGNAL_ON_CLOSED_BAR = os.getenv("SIGNAL_ON_CLOSED_BAR", "false").lower() == "true"
+
 # Forex filters
 MAX_FOREX_CURRENCY_EXPOSURE = int(os.getenv("MAX_FOREX_CURRENCY_EXPOSURE", "2"))
 MAX_SPREAD_PIPS = float(os.getenv("MAX_SPREAD_PIPS", "2.5"))
@@ -129,6 +138,14 @@ BE_DYN_RR = os.getenv("BE_DYN_RR", "true").lower() == "true"
 # avant de remonter le SL à l'entrée, réduisant les scratches sur les gagnants.
 BE_DYN_RR_RATIO = float(os.getenv("BE_DYN_RR_RATIO", "1.5"))
 
+
+# Filtre d'épuisement : refuser un achat si RSI ≥ RSI_OB ou position Bollinger > ENTRY_BB_EXTREME,
+# et une vente si RSI ≤ RSI_OS ou position Bollinger < 1 - ENTRY_BB_EXTREME.
+# Analyse 22/09→06/10 : les entrées RSI ≥ 70 dans le sens du trade ont perdu −36 € sur 22 trades.
+# Backtest A/B 15m (60 j) NON CONCLUANT (27 trades, écart négligeable) → désactivé par défaut,
+# à activer (true) seulement après validation sur davantage de données.
+ENTRY_EXHAUSTION_FILTER = os.getenv("ENTRY_EXHAUSTION_FILTER", "false").lower() == "true"
+ENTRY_BB_EXTREME = float(os.getenv("ENTRY_BB_EXTREME", "0.95"))
 
 # Score thresholds
 SCORE_MIN = int(os.getenv("SCORE_MIN", "6"))  # Minimum score to enter (out of 10 max base score)
@@ -225,6 +242,10 @@ MAX_PARALLEL_SYMBOLS = int(os.getenv("MAX_PARALLEL_SYMBOLS", "4"))
 # Objectif de gain journalier en EUR (pour comptes ≥ 1000€)
 # Le PerformanceLearner adapte automatiquement pour les autres soldes
 DAILY_TARGET_EUR = float(os.getenv("DAILY_TARGET_EUR", "200.0"))
+# Objectif journalier réellement utilisé : % du solde de début de journée (SessionManager).
+# 2 % ≈ un gain de 2R avec 1 % de risque. Indicatif : sert au suivi, aux rapports et au
+# performance_log (il ne modifie ni le sizing ni le score minimum).
+DAILY_TARGET_PCT = float(os.getenv("DAILY_TARGET_PCT", "2.0"))
 # Activer la conscience temporelle (sessions Asia/London/NY)
 SESSION_AWARE = os.getenv("SESSION_AWARE", "true").lower() == "true"
 # Mode de condition : 'paper' = paper trading, 'live_conditions' = mêmes règles que live mais en paper
@@ -272,6 +293,15 @@ ALPHAVANTAGE_API_KEY = os.getenv("ALPHAVANTAGE_API_KEY", "")
 FRED_API_KEY = os.getenv("FRED_API_KEY", "")
 # NewsAPI (optionnel, 100 req/jour gratuit)
 NEWS_API_KEY = os.getenv("NEWS_API_KEY", "")
+
+# Mode « ombre » du modèle ML (OnlineLearner/EnsembleScorer) : la probabilité est
+# calculée et journalisée mais n'a AUCUN effet (ni veto, ni ajustement de taille).
+# Analyse 22/09→06/10 : modèle entraîné sur un journal pollué (doublons, P&L faux),
+# non prédictif. Ne réactiver (false) qu'après validation hors échantillon via
+# artifacts/retrain_ml_scorer.py (AUC ≥ ML_MIN_AUC sur ≥ ML_MIN_VERIFIED_TRADES trades).
+ML_SHADOW_MODE = os.getenv("ML_SHADOW_MODE", "true").lower() == "true"
+ML_MIN_VERIFIED_TRADES = int(os.getenv("ML_MIN_VERIFIED_TRADES", "200"))
+ML_MIN_AUC = float(os.getenv("ML_MIN_AUC", "0.55"))
 
 # =============================================================================
 # 📊 PARAMÈTRES ADAPTATIFS PAR SOLDE — V3
@@ -336,8 +366,13 @@ FOREX_SESSIONS_UTC = [
 # LOGGING CONFIGURATION
 # =============================================================================
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-LOG_DIR = Path(__file__).parent / "logs"
-LOG_DIR.mkdir(exist_ok=True)
+# Les dossiers d'état sont surchargeables par variable d'environnement : la suite de
+# tests (conftest.py) les redirige vers un dossier temporaire pour ne jamais écrire
+# dans les fichiers du bot live.
+LOG_DIR = Path(os.getenv("NEXQUANT_LOG_DIR", str(Path(__file__).parent / "logs")))
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+REPORTS_DIR = os.getenv("NEXQUANT_REPORTS_DIR", "reports")
+ML_MODEL_PATH = os.getenv("NEXQUANT_MODEL_PATH", "resources/ensemble_scorer.pkl")
 LOG_FILE = LOG_DIR / f"superbot_{BROKER_TYPE}.log"
 TRADE_LOG_FILE = LOG_DIR / f"trades_{BROKER_TYPE}.jsonl"  # Structured trade logs for analysis
 ERROR_LOG_FILE = LOG_DIR / f"errors_{BROKER_TYPE}.log"
@@ -479,6 +514,7 @@ __all__ = [
     "SL_ATR_MULT_FOREX", "TP_ATR_MULT_FOREX", "FOREX_NEWS_AVOID_MINUTES",
     # Risk Management
     "ENABLE_LOSS_LIMIT", "RISK_PCT", "SL_ATR_MULT", "TP_ATR_MULT", "TRAIL_ATR_MULT", "TRAIL_ACTIVATE_ATR_MULT", "BE_ATR_MULT",
+    "ENTRY_EXHAUSTION_FILTER", "ENTRY_BB_EXTREME",
     "SCORE_MIN", "SCORE_MODE", "MAX_DAILY_LOSS_PCT", "MAX_MONTHLY_LOSS_PCT", "MAX_OPEN_POSITIONS",
     "TSMOM_ENABLED", "TSMOM_LOOKBACK", "TSMOM_SKIP", "TSMOM_TARGET_VOL",
     "TSMOM_MAX_LEVERAGE", "TSMOM_VOL_WINDOW", "TSMOM_UNIVERSE",
@@ -487,7 +523,7 @@ __all__ = [
     "MIN_POSITION_SIZE", "MAX_POSITION_SIZE", "KELLY_FRACTION", "MIN_TRADES_FOR_KELLY",
     "COOLDOWN_SECONDS",
     "MAX_FOREX_CURRENCY_EXPOSURE", "MAX_SPREAD_PIPS", "MAX_SPREAD_PIPS_CRYPTO", "MAX_SPREAD_PIPS_COMMODITY",
-    "BE_DYN_RR", "BE_DYN_RR_RATIO",
+    "BE_DYN_RR", "BE_DYN_RR_RATIO", "ENABLED_STRATEGIES", "USE_STRATEGY_SL_TP", "SIGNAL_ON_CLOSED_BAR",
     "DRAWDOWN_REDUCE_5PCT", "DRAWDOWN_REDUCE_10PCT", "DRAWDOWN_THRESH_1", "DRAWDOWN_THRESH_2",
 
     # Protection nocturne
@@ -502,11 +538,12 @@ __all__ = [
     "CYCLE_TIME", "SYMBOL_TIMEOUT_SECONDS", "MAX_PARALLEL_SYMBOLS",
 
     # 🎯 V3 — Objectifs journaliers & sessions
-    "DAILY_TARGET_EUR", "SESSION_TARGET_EQUITY_MIN", "SESSION_TARGET_EQUITY_MAX", "SESSION_AWARE", "TRADING_MODE",
+    "DAILY_TARGET_EUR", "DAILY_TARGET_PCT", "SESSION_TARGET_EQUITY_MIN", "SESSION_TARGET_EQUITY_MAX", "SESSION_AWARE", "TRADING_MODE",
     "SIMULATED_SLIPPAGE_POINTS", "SIMULATED_COMMISSION_PCT",
 
     # 🧠 V3 — Auto-apprentissage
     "AUTO_LEARN_ENABLED", "POST_SESSION_DEBRIEF_HOUR_UTC", "PRE_SESSION_ANALYSIS_HOUR_UTC",
+    "ML_SHADOW_MODE", "ML_MIN_VERIFIED_TRADES", "ML_MIN_AUC",
     "KNOWLEDGE_FEEDER_ENABLED", "KNOWLEDGE_FEEDER_HOUR_UTC",
     "REDDIT_CLIENT_ID", "REDDIT_CLIENT_SECRET",
     "FRED_API_KEY", "NEWS_API_KEY",
@@ -528,6 +565,7 @@ __all__ = [
     # Sessions
     "FOREX_SESSIONS_UTC", # Logging
     "LOG_LEVEL", "LOG_DIR", "LOG_FILE", "TRADE_LOG_FILE", "ERROR_LOG_FILE", "BUG_LOG_FILE",
+    "REPORTS_DIR", "ML_MODEL_PATH",
 
     # Development
     "LOG_TRADES", "ENABLE_DASHBOARD",

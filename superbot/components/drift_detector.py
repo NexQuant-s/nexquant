@@ -37,26 +37,16 @@ def detect_model_drift(bot):
     # Plancher de sécurité strict : le risque ne doit jamais descendre sous 0.5%
     MIN_ADAPTIVE_RISK = 0.5
 
+    # Chaque réduction n'est appliquée qu'UNE fois (le code dupliqué divisait le risque par 8).
     if win_rate < 0.20:
-        log.error(f"🚨 Dérive sévère détectée: taux de victoire ({win_rate:.2f}). Mise en pause 2h et réduction du risque de 50%.")
-        bot.is_paused = True
-        bot._drift_pause_until = datetime.now(timezone.utc) + timedelta(hours=2)
-        bot.adaptive_risk_pct = bot.adaptive_risk_pct * 0.5
+        bot.adaptive_risk_pct = max(MIN_ADAPTIVE_RISK, round(bot.adaptive_risk_pct * 0.5, 2))
         if getattr(bot, 'auto_unpause', False):
-            log.warning(f"⚠️ Dérive détectée: taux de victoire ({win_rate:.2f}). Réduction du risque de 50% (auto-unpause actif: pause annulée pour maintenir le trading continu).")
-            bot.adaptive_risk_pct = bot.adaptive_risk_pct * 0.5
-            bot.is_paused = False
-            if hasattr(bot, '_drift_pause_until'):
-                del bot._drift_pause_until
-            bot.adaptive_risk_pct = max(MIN_ADAPTIVE_RISK, round(bot.adaptive_risk_pct * 0.5, 2))
+            log.warning(f"⚠️ Dérive détectée: taux de victoire ({win_rate:.2f}). Réduction du risque de 50% (auto-unpause actif: pas de pause pour maintenir le trading continu).")
         else:
             log.error(f"🚨 Dérive sévère détectée: taux de victoire ({win_rate:.2f}). Mise en pause 2h et réduction du risque de 50%.")
             bot.is_paused = True
             bot._drift_pause_until = datetime.now(timezone.utc) + timedelta(hours=2)
-            bot.adaptive_risk_pct = bot.adaptive_risk_pct * 0.5
-            bot.adaptive_risk_pct = max(MIN_ADAPTIVE_RISK, round(bot.adaptive_risk_pct * 0.5, 2))
     elif win_rate < 0.30:
         log.warning(f"⚠️ Dérive modérée détectée: taux de victoire ({win_rate:.2f}). Réduction du risque de 25%.")
-        bot.adaptive_risk_pct = bot.adaptive_risk_pct * 0.75
         bot.adaptive_risk_pct = max(MIN_ADAPTIVE_RISK, round(bot.adaptive_risk_pct * 0.75, 2))
 

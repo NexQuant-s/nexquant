@@ -32,8 +32,8 @@ Usage :
 """
 import logging
 import re
-from typing import List, Optional, Dict, Any
-from datetime import datetime, timedelta
+from typing import List, Dict, Any
+from datetime import datetime
 
 log = logging.getLogger("news.sentiment_analyzer")
 

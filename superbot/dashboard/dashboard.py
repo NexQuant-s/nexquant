@@ -7,14 +7,70 @@ import json
 import math
 import os
 import threading
-import time
-from datetime import datetime, timedelta
-from typing import Dict, Any, Optional
+from datetime import datetime
+from typing import Dict, Any, List
 import logging
-from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import urllib.parse
+from pathlib import Path
 
 log = logging.getLogger("dashboard")
+
+
+def _safe_float(value, default=0.0):
+  try:
+    number = float(value)
+    return number if math.isfinite(number) else default
+  except (TypeError, ValueError):
+    return default
+
+
+def _load_backtest_reports():
+  results_dir = Path(os.environ.get(
+    "BACKTEST_RESULTS_DIR",
+    Path(__file__).resolve().parents[1] / "backtest" / "results",
+  ))
+  reports = []
+  if not results_dir.is_dir():
+    return reports
+
+  for report_path in sorted(results_dir.glob("*.json")):
+    try:
+      with report_path.open("r", encoding="utf-8") as report_file:
+        payload = json.load(report_file)
+      if not isinstance(payload, dict):
+        continue
+      metadata = payload.get("metadata", {})
+      metrics = payload.get("metrics", {})
+      stats = payload.get("stats", {})
+      equity = payload.get("equity_curve", [])
+      trades = payload.get("trades", [])
+
+      def get_value(key, fallback=None, payload=payload, metrics=metrics, stats=stats):
+        return payload.get(key, metrics.get(key, stats.get(key, fallback)))
+
+      reports.append({
+        "name": payload.get("strategy_name") or metadata.get("strategy") or report_path.stem,
+        "symbol": payload.get("symbol") or metadata.get("symbol", ""),
+        "timeframe": payload.get("timeframe") or metadata.get("timeframe", ""),
+        "start_date": payload.get("start_date") or metadata.get("start_date", ""),
+        "end_date": payload.get("end_date") or metadata.get("end_date", ""),
+        "total_return": _safe_float(get_value("total_return_pct", get_value("total_return", 0))),
+        "max_drawdown": abs(_safe_float(get_value("max_drawdown_pct", get_value("max_drawdown", 0)))),
+        "sharpe_ratio": _safe_float(get_value("sharpe_ratio", 0)),
+        "sortino_ratio": _safe_float(get_value("sortino_ratio", 0)),
+        "calmar_ratio": _safe_float(get_value("calmar_ratio", 0)),
+        "win_rate": _safe_float(get_value("win_rate", 0)),
+        "profit_factor": _safe_float(get_value("profit_factor", 0)),
+        "total_trades": int(_safe_float(get_value("total_trades", len(trades)))),
+        "equity_curve": [_safe_float(value) for value in equity if _safe_float(value) > 0],
+        "trades": trades if isinstance(trades, list) else [],
+        "params": payload.get("params_used", payload.get("parameters", {})),
+        "walk_forward": payload.get("walk_forward"),
+      })
+    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+      log.warning("Rapport de backtest ignoré (%s): %s", report_path, exc)
+  return reports
 
 
 def _is_displayable_closed_trade(trade: Dict[str, Any]) -> bool:
@@ -35,15 +91,22 @@ def _is_displayable_closed_trade(trade: Dict[str, Any]) -> bool:
     return all(math.isfinite(value) for value in (entry_price, exit_price, pnl)) and entry_price > 0 and exit_price > 0
 
 
+def _round_or_none(value, digits):
+    """Arrondi tolérant (valeurs manquantes ou non numériques → None, sans exception)."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return round(number, digits) if math.isfinite(number) else None
+
+
 def load_global_trades():
     import glob
-    folders_to_try = [
-        "superbot/logs",
-        "../logs",
-        os.path.join(os.path.dirname(__file__), "..", "logs"),
-        os.path.join(os.path.dirname(__file__), "logs")
-    ]
-    
+    from superbot.config import LOG_DIR
+    from superbot.risk.modules.trade_recorder import dedupe_trade_rows
+    # Dossier configuré (redirigé par les tests) ; plus de chemins relatifs au répertoire courant
+    folders_to_try = [str(LOG_DIR)]
+
     trades_files = []
     # Scanner trades_*.jsonl
     for folder in folders_to_try:
@@ -80,7 +143,12 @@ def load_global_trades():
         except Exception as e:
             log.error(f"Erreur lors de la lecture de {trades_file} : {e}")
 
-    # Dédupliquer les trades pour éviter d'afficher le même trade en double (ex: s'il est présent dans trades.jsonl et trades_*.jsonl)
+    # Réconcilier les anciennes lignes « bot » et « broker » d'un même trade (par position_id /
+    # prix d'entrée), comme le fait le bot au démarrage, puis retirer les doublons exacts.
+    try:
+        raw_trades = dedupe_trade_rows(raw_trades, [])
+    except Exception as e:
+        log.debug(f"Réconciliation des trades impossible : {e}")
     seen_trades = set()
     deduped_trades = []
     for t in raw_trades:
@@ -88,16 +156,11 @@ def load_global_trades():
         if isinstance(ts, str) and 'T' in ts:
             ts = ts.split('.')[0]
         
-        pnl = t.get('pnl')
-        pnl_val = round(float(pnl), 4) if pnl is not None else None
-        
-        entry = t.get('entry_price')
-        entry_val = round(float(entry), 4) if entry is not None else None
-        
-        qty = t.get('qty') or t.get('size')
-        qty_val = round(float(qty), 6) if qty is not None else None
-        
-        key = (
+        pnl_val = _round_or_none(t.get('pnl'), 4)
+        entry_val = _round_or_none(t.get('entry_price'), 4)
+        qty_val = _round_or_none(t.get('qty') or t.get('size') or t.get('position_size'), 6)
+
+        key = (t.get('position_id'),) if t.get('position_id') else (
             t.get('symbol'),
             t.get('side'),
             t.get('status'),
@@ -131,7 +194,6 @@ def load_global_trades():
     active_positions = {}
     closed_history = []
     # Seuil : un trade ouvert de plus de 24h sans clôture est considéré orphelin
-    from datetime import timezone as _tz
     now_utc = datetime.now(_tz.utc)
     ORPHAN_THRESHOLD_HOURS = 24
 
@@ -203,9 +265,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         """Traite les requêtes GET."""
-        parsed_path = urllib.parse.urlparse(self.path)
-        path = parsed_path.path
-        query_params = urllib.parse.parse_qs(parsed_path.query)
+        path = urllib.parse.urlparse(self.path).path
 
         try:
             if path == '/' or path == '/index.html':
@@ -216,6 +276,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._serve_api_logs()
             elif path == '/health':
                 self._serve_health()
+            elif path == '/performance':
+                self._serve_performance_page()
+            elif path == '/trades':
+                self._serve_trades_page()
+            elif path == '/compare':
+                self._serve_compare_page()
+            elif path == '/optimize':
+                self._serve_optimize_page()
+            elif path == '/api/performance-data':
+                self._serve_api_performance_data()
+            elif path == '/api/trades-data':
+                self._serve_api_trades_data()
+            elif path == '/api/compare-data':
+                self._serve_api_compare_data()
+            elif path == '/api/optimize-data':
+                self._serve_api_optimize_data()
             else:
                 self.send_error(404, "Not found")
         except Exception as e:
@@ -245,13 +321,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     news_sentiment = raw_data.get('news_sentiment', {})
                     positions = raw_data.get('positions', {})
                     
-                    total_trades = stats.get('total_trades', 0)
-                    win_trades = stats.get('win_trades', 0)
-                    win_rate = (win_trades / total_trades) if total_trades > 0 else 0.0
-
                     bot_running = stats.get('running', True)
 
                     global_closed, global_active = load_global_trades()
+
+                    # Win rate / profit factor calculés sur l'historique réel (stats n'expose pas
+                    # total_trades / win_trades : l'ancien calcul affichait toujours 0 %).
+                    pnls = [_safe_float(t.get('pnl')) for t in global_closed]
+                    gains = sum(p for p in pnls if p > 0)
+                    losses = -sum(p for p in pnls if p < 0)
+                    win_rate = (sum(1 for p in pnls if p > 0) / len(pnls)) if pnls else 0.0
+                    profit_factor = risk_metrics.get('profit_factor')
+                    if profit_factor is None:
+                        profit_factor = round(gains / losses, 2) if losses > 0 else (None if gains == 0 else 99.0)
+                    balance = account.get('balance') or account.get('equity')
 
                     data = {
                         'timestamp': raw_data.get('timestamp', datetime.now().isoformat()),
@@ -261,13 +344,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                             'start_time': stats.get('start_time')
                         },
                         'performance': {
-                            'initial_balance': account.get('initial_balance') or 10000.0,
-                            'current_balance': account.get('balance') or account.get('equity') or 10000.0,
+                            # Plus de valeur fictive (10 000) : null si le broker ne la fournit pas
+                            'initial_balance': account.get('initial_balance') or None,
+                            'current_balance': balance or None,
                             'total_pnl':       account.get('pnl', 0.0) or 0.0,
                             'unrealized_pnl':  account.get('unrealized_pnl', 0.0) or 0.0,
                             'drawdown_pct':    risk_metrics.get('drawdown_pct', 0.0) or 0.0,
                             'win_rate':        win_rate,
-                            'profit_factor':   risk_metrics.get('profit_factor', 1.0) or 1.0,
+                            'profit_factor':   profit_factor,
                             'broker':          account.get('broker', raw_data.get('broker_type', '')),
                             'account_type':    account.get('account_type', 'PAPER'),
                         },
@@ -333,9 +417,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                     if mtime > latest_mtime:
                         latest_mtime = mtime
                         log_file = p
-                except Exception:
-                    pass
-                
+                except OSError as e:
+                    log.debug(f"Log inaccessible ({p}) : {e}")
+
         content = ""
         if log_file and os.path.exists(log_file):
             try:
@@ -367,6 +451,365 @@ class DashboardHandler(BaseHTTPRequestHandler):
             "timestamp": datetime.now().isoformat()
         }
         self.wfile.write(json.dumps(health_data).encode('utf-8'))
+
+    def _serve_performance_page(self):
+        """Sert la page de visualisation des performances."""
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.end_headers()
+        html_content = self._generate_performance_html()
+        self.wfile.write(html_content.encode('utf-8'))
+
+    def _serve_trades_page(self):
+        """Sert la page d'analyse des trades."""
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.end_headers()
+        html_content = self._generate_trades_html()
+        self.wfile.write(html_content.encode('utf-8'))
+
+    def _serve_compare_page(self):
+        """Sert la page de comparaison des stratégies."""
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.end_headers()
+        html_content = self._generate_compare_html()
+        self.wfile.write(html_content.encode('utf-8'))
+
+    def _serve_optimize_page(self):
+        """Sert la page d'optimisation des paramètres."""
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        self.end_headers()
+        html_content = self._generate_optimize_html()
+        self.wfile.write(html_content.encode('utf-8'))
+
+    def _serve_api_performance_data(self):
+        """Sert les données de performance en format JSON."""
+        self._serve_analytics_data(self._prepare_performance_data, 'performance')
+
+    def _serve_api_trades_data(self):
+        """Sert les données des trades en format JSON."""
+        self._serve_analytics_data(self._prepare_trades_data, 'trades')
+
+    def _serve_api_compare_data(self):
+        """Sert les données de comparaison en format JSON."""
+        self._serve_analytics_data(self._prepare_compare_data, 'comparison')
+
+    def _serve_api_optimize_data(self):
+        """Sert les données d'optimisation en format JSON."""
+        self._serve_analytics_data(self._prepare_optimize_data, 'optimization')
+
+    def _serve_analytics_data(self, prepare_data, label):
+      try:
+        raw_data = self.dashboard_data_func() if callable(self.dashboard_data_func) else {}
+        response = prepare_data(raw_data)
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+        self.send_header('Pragma', 'no-cache')
+        self.send_header('Expires', '0')
+        self.end_headers()
+        self.wfile.write(json.dumps(response, default=str, allow_nan=False).encode('utf-8'))
+      except Exception as exc:
+        log.exception("Erreur lors de la génération des données %s: %s", label, exc)
+        self.send_error(500, "Internal server error")
+
+    # === Méthodes de préparation des données pour les nouvelles pages ===
+    def _closed_trades(self, raw_data):
+      if isinstance(raw_data, dict) and isinstance(raw_data.get('global_history'), list):
+        trades = raw_data['global_history']
+      elif isinstance(raw_data, dict) and isinstance(raw_data.get('trades'), list):
+        trades = raw_data['trades']
+      else:
+        trades, _ = load_global_trades()
+      return [
+        dict(trade) for trade in trades
+        if isinstance(trade, dict)
+        and trade.get('status', 'closed') == 'closed'
+        and math.isfinite(_safe_float(trade.get('pnl'), float('nan')))
+      ]
+
+    def _prepare_performance_data(self, raw_data):
+      trades = self._closed_trades(raw_data)
+      account = raw_data.get('account', raw_data.get('performance', {})) if isinstance(raw_data, dict) else {}
+      # Capital de départ de l'historique = solde actuel − P&L cumulé (l'« initial_balance » du bot
+      # n'est que le solde au démarrage de la session). Plus de valeur fictive à 10 000.
+      balance = _safe_float(account.get('balance') or account.get('current_balance') or account.get('equity'))
+      if balance > 0:
+        initial = balance - sum(_safe_float(trade.get('pnl')) for trade in trades)
+      else:
+        initial = _safe_float(account.get('initial_balance'))
+
+      equity = [initial]
+      equity_timestamps = ['']
+      returns = []
+      monthly_returns = {}
+      cumulative = initial
+      for trade in trades:
+        pnl = _safe_float(trade.get('pnl'))
+        return_pct = _safe_float(trade.get('pnl_pct'), pnl / cumulative * 100 if cumulative > 0 else 0)
+        returns.append(return_pct)
+        exit_time = trade.get('exit_time') or trade.get('closed_at') or trade.get('timestamp')
+        if exit_time:
+          try:
+            month = datetime.fromisoformat(str(exit_time).replace('Z', '+00:00')).strftime('%Y-%m')
+            monthly_returns[month] = monthly_returns.get(month, 0.0) + return_pct
+          except ValueError:
+            pass
+        cumulative += pnl
+        equity.append(cumulative)
+        equity_timestamps.append(exit_time or '')
+
+      drawdown = self._calculate_drawdown(equity)
+      wins = [trade for trade in trades if _safe_float(trade.get('pnl')) > 0]
+      losses = [trade for trade in trades if _safe_float(trade.get('pnl')) < 0]
+      gross_profit = sum(_safe_float(trade.get('pnl')) for trade in wins)
+      gross_loss = abs(sum(_safe_float(trade.get('pnl')) for trade in losses))
+      average = sum(returns) / len(returns) if returns else 0.0
+      variance = sum((value - average) ** 2 for value in returns) / len(returns) if returns else 0.0
+      downside = [value for value in returns if value < 0]
+      downside_deviation = math.sqrt(sum(value ** 2 for value in downside) / len(returns)) if returns else 0.0
+      total_return = (cumulative - initial) / initial * 100 if initial > 0 else 0.0
+      max_drawdown = max((abs(value) for value in drawdown), default=0.0)
+
+      return {
+        'equity_curve': equity,
+            'equity_timestamps': equity_timestamps,
+        'drawdown_curve': drawdown,
+            'monthly_returns': monthly_returns,
+        'metrics': {
+          'total_return': total_return,
+          'sharpe_ratio': average / math.sqrt(variance) if variance > 0 else 0.0,
+          'sortino_ratio': average / downside_deviation if downside_deviation > 0 else 0.0,
+          'calmar_ratio': total_return / max_drawdown if max_drawdown > 0 else 0.0,
+          'max_drawdown': max_drawdown,
+          'win_rate': len(wins) / len(trades) * 100 if trades else 0.0,
+                'profit_factor': gross_profit / gross_loss if gross_loss else None,
+          'total_trades': len(trades),
+          'avg_win': gross_profit / len(wins) if wins else 0.0,
+          'avg_loss': gross_loss / len(losses) if losses else 0.0,
+        },
+        'pnl_distribution': [_safe_float(trade.get('pnl')) for trade in trades],
+        'trades': trades,
+      }
+
+    def _prepare_trades_data(self, raw_data):
+      formatted = []
+      for trade in self._closed_trades(raw_data):
+        entry_time = trade.get('entry_time') or trade.get('open_time') or trade.get('opened_at')
+        exit_time = trade.get('exit_time') or trade.get('closed_at') or trade.get('timestamp')
+        duration_seconds = _safe_float(trade.get('duration_seconds'), -1)
+        if duration_seconds < 0 and entry_time and exit_time:
+          try:
+            start = datetime.fromisoformat(str(entry_time).replace('Z', '+00:00'))
+            end = datetime.fromisoformat(str(exit_time).replace('Z', '+00:00'))
+            if start.tzinfo is None and end.tzinfo is not None:
+              start = start.replace(tzinfo=end.tzinfo)
+            elif end.tzinfo is None and start.tzinfo is not None:
+              end = end.replace(tzinfo=start.tzinfo)
+            duration_seconds = max(0.0, (end - start).total_seconds())
+          except (TypeError, ValueError):
+            duration_seconds = None
+        formatted.append({
+          'symbol': trade.get('symbol', ''),
+          'side': trade.get('side') or trade.get('direction', ''),
+          'entry_price': _safe_float(trade.get('entry_price')),
+          'exit_price': _safe_float(trade.get('exit_price')),
+          'pnl': _safe_float(trade.get('pnl')),
+          'timestamp': exit_time or entry_time or '',
+          'entry_time': entry_time or '',
+          'exit_time': exit_time or '',
+          'duration_seconds': duration_seconds,
+          'market_regime': trade.get('market_regime', ''),
+          'signal_score': _safe_float(trade.get('signal_score', trade.get('score'))),
+          'win_prob': _safe_float(trade.get('win_prob')),
+          'strategy_name': trade.get('strategy_name', ''),
+          'broker': trade.get('broker', ''),
+          'status': 'closed',
+        })
+
+      symbol_stats = {}
+      regime_stats = {}
+      for trade in formatted:
+        symbol = trade['symbol'] or 'Inconnu'
+        symbol_row = symbol_stats.setdefault(symbol, {'wins': 0, 'losses': 0, 'pnl': 0.0})
+        regime_row = regime_stats.setdefault(trade['market_regime'] or 'unknown', {'wins': 0, 'total': 0})
+        symbol_row['pnl'] += trade['pnl']
+        regime_row['total'] += 1
+        if trade['pnl'] > 0:
+          symbol_row['wins'] += 1
+          regime_row['wins'] += 1
+        else:
+          symbol_row['losses'] += 1
+
+      pnls = [trade['pnl'] for trade in formatted]
+      winners = sum(value > 0 for value in pnls)
+      return {
+        'trades': formatted,
+        'symbol_stats': symbol_stats,
+        'regime_stats': regime_stats,
+        'stats': {
+          'total_count': len(formatted),
+          'winning_count': winners,
+          'losing_count': len(formatted) - winners,
+          'win_rate': winners / len(formatted) * 100 if formatted else 0.0,
+          'avg_pnl': sum(pnls) / len(pnls) if pnls else 0.0,
+          'best_trade': max(pnls, default=0.0),
+          'worst_trade': min(pnls, default=0.0),
+          'total_pnl': sum(pnls),
+        }
+      }
+
+    def _prepare_compare_data(self, raw_data=None):
+      reports = _load_backtest_reports()
+      names = [report['name'] for report in reports]
+      return_values = {
+        'total_return': [report['total_return'] for report in reports],
+        'max_drawdown': [report['max_drawdown'] for report in reports],
+        'sharpe_ratio': [report['sharpe_ratio'] for report in reports],
+        'win_rate': [report['win_rate'] for report in reports],
+        'profit_factor': [report['profit_factor'] for report in reports],
+      }
+      for report in reports:
+        monthly = {}
+        for trade in report['trades']:
+          if not isinstance(trade, dict):
+            continue
+          exit_time = trade.get('exit_time') or trade.get('timestamp')
+          if not exit_time:
+            continue
+          try:
+            month = datetime.fromisoformat(str(exit_time).replace('Z', '+00:00')).strftime('%Y-%m')
+          except ValueError:
+            continue
+          monthly[month] = monthly.get(month, 0.0) + _safe_float(trade.get('pnl_pct', trade.get('pnl')))
+        report['monthly_returns'] = monthly
+
+      matrix = []
+      for left in reports:
+        row = []
+        for right in reports:
+          shared_periods = sorted(set(left['monthly_returns']) & set(right['monthly_returns']))
+          x_values = [left['monthly_returns'][period] for period in shared_periods]
+          y_values = [right['monthly_returns'][period] for period in shared_periods]
+          count = len(shared_periods)
+          if count < 2:
+            correlation = None
+          else:
+            x_mean = sum(x_values) / count
+            y_mean = sum(y_values) / count
+            covariance = sum((x - x_mean) * (y - y_mean) for x, y in zip(x_values, y_values, strict=True))
+            x_var = sum((x - x_mean) ** 2 for x in x_values)
+            y_var = sum((y - y_mean) ** 2 for y in y_values)
+            correlation = covariance / math.sqrt(x_var * y_var) if x_var and y_var else None
+          row.append(correlation)
+        matrix.append(row)
+
+      periods = sorted({period for report in reports for period in report['monthly_returns']})
+      period_returns = [{
+        'name': report['name'],
+        'data': [{'x': period, 'y': report['monthly_returns'].get(period)} for period in periods],
+      } for report in reports]
+
+      return {
+        'strategies': reports,
+        'comparison_available': len(reports) > 1,
+        'message': '' if len(reports) > 1 else 'Ajoutez au moins deux rapports JSON dans le dossier des résultats de backtest.',
+        'correlation': {'labels': names, 'matrix': matrix},
+        'metric_series': return_values,
+        'period_returns': period_returns,
+      }
+
+    def _prepare_optimize_data(self, raw_data=None):
+      reports = _load_backtest_reports()
+      param_values = {}
+      for report in reports:
+        if not isinstance(report['params'], dict):
+          continue
+        for name, value in report['params'].items():
+          if type(value) in (int, float) and math.isfinite(value):
+            param_values.setdefault(name, set()).add(value)
+      varied = [name for name, values in param_values.items() if len(values) > 1]
+      varied.sort()
+      walk_forward = [
+        {'name': report['name'], **report['walk_forward']}
+        for report in reports if isinstance(report['walk_forward'], dict)
+      ]
+      if not varied:
+        return {
+          'available': bool(walk_forward),
+          'parameter_available': False,
+          'message': 'Aucun balayage de paramètres détecté. Fournissez plusieurs rapports avec des valeurs params_used différentes.',
+          'parameters': [], 'results': [], 'heatmap': [], 'walk_forward': walk_forward,
+        }
+
+      parameters = [{
+        'name': name,
+        'values': sorted(param_values[name], key=lambda value: (type(value).__name__, str(value))),
+      } for name in varied]
+      results = []
+      for report in reports:
+        for name in varied:
+          if name in report['params']:
+            results.append({
+              'parameter': name,
+              'value': report['params'][name],
+              'return': report['total_return'],
+              'max_drawdown': report['max_drawdown'],
+              'sharpe_ratio': report['sharpe_ratio'],
+              'report': report['name'],
+            })
+
+      heatmap = []
+      if len(varied) > 1:
+        x_name, y_name = varied[:2]
+        heatmap = [{
+          'x': report['params'].get(x_name),
+          'y': report['params'].get(y_name),
+          'z': report['total_return'],
+        } for report in reports if x_name in report['params'] and y_name in report['params']]
+      return {
+        'available': bool(results) or bool(walk_forward),
+        'parameter_available': bool(results),
+        'message': '' if results else 'Aucun résultat d’optimisation exploitable dans les rapports.',
+        'parameters': parameters,
+        'results': results,
+        'heatmap': heatmap,
+        'walk_forward': walk_forward,
+        'best_result': max(results, key=lambda result: result['return']) if results else None,
+      }
+
+    # === Méthodes auxiliaires pour les calculs ===
+    def _calculate_drawdown(self, equity_curve: List[float]) -> List[float]:
+        """Calcule la courbe de drawdown à partir de la courbe d'équité."""
+        if not equity_curve:
+            return []
+
+        peak = equity_curve[0]
+        drawdown = []
+        for value in equity_curve:
+            if value > peak:
+                peak = value
+            dd = (value / peak - 1) * 100 if peak > 0 else 0
+            drawdown.append(dd)
+        return drawdown
+
+    def _generate_performance_html(self) -> str:
+        from superbot.dashboard.pages import generate_performance_html
+        return generate_performance_html()
+
+    def _generate_trades_html(self) -> str:
+        from superbot.dashboard.pages import generate_trades_html
+        return generate_trades_html()
+
+    def _generate_compare_html(self) -> str:
+        from superbot.dashboard.pages import generate_compare_html
+        return generate_compare_html()
+
+    def _generate_optimize_html(self) -> str:
+        from superbot.dashboard.pages import generate_optimize_html
+        return generate_optimize_html()
 
     def _generate_dashboard_html(self) -> str:
         """Génère le HTML du dashboard."""
@@ -1712,6 +2155,19 @@ td.name { color: var(--txt); font-weight: 600; }
         <i class="fa-solid fa-terminal"></i>
         <span>Journaux système</span>
       </div>
+      <div class="nav-label">Analyses avancées</div>
+      <div class="nav-item" onclick="window.location.href='/performance'">
+        <i class="fa-solid fa-chart-line"></i><span>Performance</span>
+      </div>
+      <div class="nav-item" onclick="window.location.href='/trades'">
+        <i class="fa-solid fa-receipt"></i><span>Journal des trades</span>
+      </div>
+      <div class="nav-item" onclick="window.location.href='/compare'">
+        <i class="fa-solid fa-code-compare"></i><span>Comparaison</span>
+      </div>
+      <div class="nav-item" onclick="window.location.href='/optimize'">
+        <i class="fa-solid fa-sliders"></i><span>Optimisation</span>
+      </div>
     </nav>
 
     <div class="sidebar-footer">
@@ -2176,7 +2632,7 @@ function updateDynamicWidgets(assetType, marketData) {
           </div>
         </div>`;
 
-      const allocatedBalance = (lastBalanceUsd || 10000.0) / 4;
+      const allocatedBalance = (parseFloat(lastBalanceUsd) || 0) / 4;
       assetsHTML += `
         <div class="asset-box">
           <div class="asset-box-hd ${changeClass}">${item.sym.split('/')[0]} <span style="font-size:9px;">${changeStr}</span></div>
@@ -2237,7 +2693,7 @@ function updateDynamicWidgets(assetType, marketData) {
           </div>
         </div>`;
 
-      const allocatedBalance = (lastBalanceUsd || 10000.0) / 4;
+      const allocatedBalance = (parseFloat(lastBalanceUsd) || 0) / 4;
       assetsHTML += `
         <div class="asset-box">
           <div class="asset-box-hd ${changeClass}">${item.sym} <span style="font-size:9px;">${changeStr}</span></div>
@@ -2298,7 +2754,7 @@ function updateDynamicWidgets(assetType, marketData) {
           </div>
         </div>`;
 
-      const allocatedBalance = (lastBalanceUsd || 10000.0) / 4;
+      const allocatedBalance = (parseFloat(lastBalanceUsd) || 0) / 4;
       assetsHTML += `
         <div class="asset-box">
           <div class="asset-box-hd ${changeClass}">${item.sym.split('/')[0]} <span style="font-size:9px;">${changeStr}</span></div>
@@ -2638,7 +3094,7 @@ function renderChart(rawData, symbol) {
     chart = new ApexCharts(inner, opts);
     chart.render().then(() => { chartReady = true; });
   } catch(e) {
-    el.innerHTML = '<div class="empty">Erreur rendu graphique: ' + e.message + '</div>';
+    el.innerHTML = '<div class="empty">Erreur rendu graphique: ' + escapeHtml(e.message) + '</div>';
   }
 }
 
@@ -2662,7 +3118,8 @@ function setHTML(id, val) {
 }
 
 function escapeHtml(text) {
-  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return String(text ?? '').replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
 // ─── Connection state ─────────────────────────────────────────────────────
@@ -2817,8 +3274,8 @@ function renderSignalsAndTradesTable() {
     if (t.is_active) {
       rows += `<tr>
         <td class="mono">${timeStr}</td>
-        <td class="name mono">${t.symbol} ${brokerBadge}</td>
-        <td><span class="badge badge-${side === 'LONG' || side === 'BUY' ? 'long' : 'short'}">${side || '—'}</span></td>
+        <td class="name mono">${escapeHtml(t.symbol)} ${brokerBadge}</td>
+        <td><span class="badge badge-${side === 'LONG' || side === 'BUY' ? 'long' : 'short'}">${escapeHtml(side || '—')}</span></td>
         <td class="mono">${pref}${fmt(t.entry_price, dec)}</td>
         <td class="mono">${t.stop_loss > 0 ? pref + fmt(t.stop_loss, dec) : '—'}</td>
         <td class="mono">${t.take_profit > 0 ? pref + fmt(t.take_profit, dec) : '—'}</td>
@@ -2829,8 +3286,8 @@ function renderSignalsAndTradesTable() {
       const pnlStr = (pnlVal >= 0 ? '+' : '') + fmt(pnlVal, 2) + ' ' + selectedCurrency;
       rows += `<tr>
         <td class="mono">${timeStr}</td>
-        <td class="name mono">${t.symbol} ${brokerBadge}</td>
-        <td><span class="badge badge-${side === 'LONG' || side === 'BUY' ? 'long' : 'short'}">${side || '—'}</span></td>
+        <td class="name mono">${escapeHtml(t.symbol)} ${brokerBadge}</td>
+        <td><span class="badge badge-${side === 'LONG' || side === 'BUY' ? 'long' : 'short'}">${escapeHtml(side || '—')}</span></td>
         <td class="mono">${pref}${fmt(t.entry_price || 0, dec)}</td>
         <td class="mono">${pref}${fmt(t.exit_price || 0, dec)} (Sortie)</td>
         <td class="mono">—</td>
@@ -2946,14 +3403,14 @@ async function fetchData() {
     }
 
     const wr = parseFloat(perf.win_rate ?? 0);
-    const pf = parseFloat(perf.profit_factor ?? 1);
+    const pf = parseFloat(perf.profit_factor);  // null → « — » (pas de faux 1,00)
     setEl('wr-val', fmt(wr * 100, 1) + ' %');
     setEl('pf-val', fmt(pf, 2));
     
     const wrBar = document.getElementById('wr-bar');
     if (wrBar) wrBar.style.width = (wr * 100) + '%';
     const pfBar = document.getElementById('pf-bar');
-    if (pfBar) pfBar.style.width = Math.min((pf / 3) * 100, 100) + '%';
+    if (pfBar) pfBar.style.width = (isNaN(pf) ? 0 : Math.min((pf / 3) * 100, 100)) + '%';
 
     // ── KPI: Drawdown ──
     const dd = Math.abs(parseFloat(perf.drawdown_pct ?? 0));
@@ -2997,10 +3454,10 @@ async function fetchData() {
         newsBody.innerHTML = events.map(ev => {
           const dateObj = new Date(ev.timestamp);
           const timeStr = isNaN(dateObj.getTime()) ? '' : dateObj.toLocaleDateString('fr-FR', {month:'2-digit', day:'2-digit'}) + ' ' + dateObj.toLocaleTimeString('fr-FR', {hour:'2-digit', minute:'2-digit'});
-          const impactBadge = ev.impact === 'HIGH' ? '<span class="badge badge-short" style="background:#ef4444; color:#fff; border:none; padding:2px 6px;">HIGH</span>' : `<span class="badge" style="background:#f59e0b; color:#fff; border:none; padding:2px 6px;">${ev.impact}</span>`;
+          const impactBadge = ev.impact === 'HIGH' ? '<span class="badge badge-short" style="background:#ef4444; color:#fff; border:none; padding:2px 6px;">HIGH</span>' : `<span class="badge" style="background:#f59e0b; color:#fff; border:none; padding:2px 6px;">${escapeHtml(ev.impact)}</span>`;
           return `<div style="padding: 12px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 4px;">
             <div style="display: flex; justify-content: space-between; align-items: center;">
-              <span style="font-size: 11px; color: var(--txt-secondary); font-weight:600">${ev.currency || 'ALL'} · ${ev.source || 'Unknown'}</span>
+              <span style="font-size: 11px; color: var(--txt-secondary); font-weight:600">${escapeHtml(ev.currency || 'ALL')} · ${escapeHtml(ev.source || 'Unknown')}</span>
               <div style="display: flex; gap: 8px; align-items: center;">
                 <span style="font-size: 10px; color: var(--txt-muted); font-family: monospace;">${timeStr}</span>
                 ${impactBadge}
@@ -3041,8 +3498,8 @@ async function fetchData() {
           const rate = getRate();
           const liq = parseFloat(p.liquidation_price || 0);
           return `<tr>
-            <td class="name mono">${sym}</td>
-            <td><span class="badge badge-${side === 'LONG' ? 'long' : 'short'}">${side || '—'}</span></td>
+            <td class="name mono">${escapeHtml(sym)}</td>
+            <td><span class="badge badge-${side === 'LONG' ? 'long' : 'short'}">${escapeHtml(side || '—')}</span></td>
             <td class="mono">${fmt(p.size, 4)}</td>
             <td class="mono">${pref}${fmt(p.entry_price, dec)}</td>
             <td class="mono">${pref}${fmt(p.current_price || p.mark_price, dec)}</td>
@@ -3132,7 +3589,7 @@ async function fetchData() {
       if (!blocked.length) {
         blockedEl.innerHTML = '<div class="empty"><i class="fa-solid fa-check-circle" style="color:var(--green);"></i> Aucun symbole bloqué</div>';
       } else {
-        blockedEl.innerHTML = blocked.map(s => `<div class="metric-item"><span class="metric-item-name">${s.symbol}</span><span class="metric-item-value" style="color:var(--red);">⚫ Bloqué — ${s.reason || '3 pertes consécutives'}</span></div>`).join('');
+        blockedEl.innerHTML = blocked.map(s => `<div class="metric-item"><span class="metric-item-name">${escapeHtml(s.symbol)}</span><span class="metric-item-value" style="color:var(--red);">⚫ Bloqué — ${escapeHtml(s.reason || '3 pertes consécutives')}</span></div>`).join('');
       }
     }
 
@@ -3143,7 +3600,7 @@ async function fetchData() {
       if (!decisions.length) {
         decisionsEl.innerHTML = '<div class="empty">Aucune décision enregistrée.</div>';
       } else {
-        decisionsEl.innerHTML = decisions.slice(-5).reverse().map(d2 => `<div style="padding:8px 0; border-bottom:1px solid var(--border); font-size:12px; color:var(--txt-secondary);"><strong style="color:var(--txt);">${d2.type || 'ajustement'}</strong> — ${d2.reason || ''} <span style="font-size:10px; color:var(--txt-muted); float:right;">${d2.time ? new Date(d2.time).toLocaleTimeString('fr-FR') : ''}</span></div>`).join('');
+        decisionsEl.innerHTML = decisions.slice(-5).reverse().map(d2 => `<div style="padding:8px 0; border-bottom:1px solid var(--border); font-size:12px; color:var(--txt-secondary);"><strong style="color:var(--txt);">${escapeHtml(d2.type || 'ajustement')}</strong> — ${escapeHtml(d2.reason || '')} <span style="font-size:10px; color:var(--txt-muted); float:right;">${d2.time ? new Date(d2.time).toLocaleTimeString('fr-FR') : ''}</span></div>`).join('');
       }
     }
 
@@ -3274,9 +3731,15 @@ def create_dashboard_data_func(broker, strategy, risk_manager, news_manager,
             start_time = None
 
             # Performance
+            # Solde réel du broker (plus de valeur fictive à 10 000 ; None si indisponible)
+            account_balance = None
+            try:
+                account_balance = float(broker.get_balance()) if hasattr(broker, 'get_balance') else None
+            except Exception as e:
+                log.debug(f"Solde broker indisponible : {e}")
             performance = {
-                'initial_balance': 10000.0,
-                'current_balance': 10000.0,
+                'initial_balance': getattr(bot_instance, 'initial_balance', None) or None,
+                'current_balance': account_balance or None,
                 'total_pnl': 0.0,
                 'daily_pnl': 0.0,
                 'monthly_pnl': 0.0,
@@ -3288,8 +3751,7 @@ def create_dashboard_data_func(broker, strategy, risk_manager, news_manager,
             # Métriques de risque
             risk_metrics = {}
             try:
-                account_balance = getattr(broker, 'get_balance', lambda: 10000.0)()
-                if hasattr(risk_manager, 'get_risk_metrics'):
+                if account_balance and hasattr(risk_manager, 'get_risk_metrics'):
                     risk_metrics = risk_manager.get_risk_metrics(account_balance)
             except Exception as e:
                 log.debug(f"Impossible d'obtenir les métriques de risque: {e}")

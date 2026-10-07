@@ -162,9 +162,11 @@ def check_major_news_window(symbol: str, avoid_minutes: int = 30, news_events: l
             if isinstance(event_time, str):
                 try:
                     event_time = datetime.fromisoformat(event_time.replace('Z', '+00:00'))
-                    event_time = event_time.replace(tzinfo=None)  # UTC naive
                 except (ValueError, AttributeError):
                     continue
+            if getattr(event_time, 'tzinfo', None) is not None:
+                # Convertir en UTC (ex: ForexFactory publie en -04:00) avant de retirer le fuseau
+                event_time = event_time.astimezone(timezone.utc).replace(tzinfo=None)
             
             # Vérifier si la devise de l'événement est dans la paire tradée
             event_currency = event.get('currency', '').upper()

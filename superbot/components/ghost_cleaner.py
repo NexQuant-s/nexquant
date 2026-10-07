@@ -145,8 +145,8 @@ def run_startup_ghost_check(bot) -> int:
             return 0  # Ne pas nettoyer si on ne peut pas vérifier
 
         # Chemin du fichier de trades
-        log_dir = os.path.join(os.path.dirname(__file__), '..', 'logs')
-        trades_file = os.path.join(log_dir, 'trades.jsonl')
+        from superbot.config import LOG_DIR
+        trades_file = os.path.join(str(LOG_DIR), 'trades.jsonl')
 
         # Dictionnaires mutables à nettoyer
         bot_positions = getattr(bot, 'positions', {})
@@ -164,8 +164,8 @@ def run_startup_ghost_check(bot) -> int:
             # Sauvegarder l'état nettoyé
             try:
                 bot._save_cooldowns()
-            except Exception:
-                pass
+            except Exception as _exc:
+                log.debug(f"Erreur ignorée (non bloquante) : {_exc}")
 
         return count
 
@@ -220,8 +220,8 @@ if __name__ == '__main__':
                 if age_days > 7:
                     print(f"  ⚠️  {sym} : âgé de {age_days} jours (potentiellement fantôme)")
                     stale_count += 1
-            except Exception:
-                pass
+            except Exception as _exc:
+                log.debug(f"Erreur ignorée (non bloquante) : {_exc}")
 
     if stale_count == 0:
         print("✅ Aucune position ancienne (> 7j) détectée.")

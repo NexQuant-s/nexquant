@@ -14,10 +14,9 @@ Détection automatique et temps réel du régime de marché :
 import logging
 import math
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 from datetime import datetime, timezone
 import pandas as pd
-import numpy as np
 
 from superbot.strategy.knowledge_base import calculate_hurst_exponent, calculate_half_life
 

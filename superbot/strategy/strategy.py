@@ -112,7 +112,12 @@ class TradingStrategy:
             curr_sess = self.session_manager.get_current_session()
             active_sessions = [curr_sess.get('name', 'LONDON')]
         else:
-            active_sessions = get_active_sessions()
+            # Heure de la dernière bougie (et non l'horloge du PC) : indispensable en backtest
+            bar_hour = None
+            if isinstance(df.index, pd.DatetimeIndex):
+                from superbot.strategy.knowledge_base import utc_bar_times
+                bar_hour = utc_bar_times(df)[-1].hour
+            active_sessions = get_active_sessions(bar_hour)
 
         # 1. Détection automatique du régime de marché
         regime: RegimeResult = self.regime_detector.detect(
@@ -130,12 +135,12 @@ class TradingStrategy:
             asset_class=asset_class,
             current_price=current_price,
             pip_size=pip_size,
-            active_sessions=active_sessions
+            active_sessions=active_sessions,
+            score_min=self.score_min,
         )
 
         result_dict = sig.to_dict()
         result_dict["symbol"] = symbol
-        result_dict["score_min"] = self.score_min
         result_dict["score_min"] = getattr(sig, 'score_min', None) or self.score_min
         result_dict["strategy_used"] = sig.strategy_name
         result_dict["market_regime"] = regime.regime

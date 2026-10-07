@@ -11,9 +11,7 @@ Orchestration dynamique des 6 stratégies adaptatives de haut niveau :
 """
 
 import logging
-import os
 from typing import Any, Dict, List, Optional, Tuple
-from datetime import datetime, timezone
 import pandas as pd
 
 from superbot.strategy.base_strategy import BaseStrategy, SignalResult
@@ -24,7 +22,6 @@ from superbot.strategy.murphy_trend import MurphyTrendStrategy
 from superbot.strategy.volman_price_action import VolmanPriceActionStrategy
 from superbot.strategy.london_breakout import LondonBreakoutStrategy
 from superbot.strategy.intermarket_momentum import IntermarketMomentumStrategy
-from superbot.brain.regime_detector import RegimeResult
 
 log = logging.getLogger("nexquant.strategy_engine")
 
@@ -42,23 +39,51 @@ class StrategyEngine:
         self.online_learner = online_learner
         self.knowledge_feeder = knowledge_feeder
 
-        # Instanciation de la suite des 6 stratégies
-        # Instanciation de la suite des stratégies avec UnifiedAlphaStrategy en maître
-        self.strategies: Dict[str, BaseStrategy] = {
-            "UNIFIED_ALPHA": UnifiedAlphaStrategy(self.config),
-            "ELDER_TRIPLE_SCREEN": ElderTripleScreenStrategy(self.config),
-            "CHAN_MEAN_REVERSION": ChanMeanReversionStrategy(self.config),
-            "MURPHY_TREND": MurphyTrendStrategy(self.config),
-            "VOLMAN_PRICE_ACTION": VolmanPriceActionStrategy(self.config),
-            "LONDON_BREAKOUT": LondonBreakoutStrategy(self.config),
-            "INTERMARKET_MOMENTUM": IntermarketMomentumStrategy(self.config),
-        }
+        # Suite des stratégies (UnifiedAlphaStrategy en maître)
+        self.strategies: Dict[str, BaseStrategy] = self._build_strategies(self.config)
         self._strategy_stats: Dict[str, Dict] = {
             name: {"trades": 0, "wins": 0, "total_pnl": 0.0}
             for name in self.strategies
         }
-        log.info("StrategyEngine MT5 initialisé avec 6 stratégies d'élite")
         log.info("StrategyEngine MT5 initialisé avec UnifiedAlphaStrategy et 6 stratégies d'élite")
+
+    @staticmethod
+    def _build_strategies(config: Dict[str, Any]) -> Dict[str, BaseStrategy]:
+        strategies = {
+            "UNIFIED_ALPHA": UnifiedAlphaStrategy(config),
+            "ELDER_TRIPLE_SCREEN": ElderTripleScreenStrategy(config),
+            "CHAN_MEAN_REVERSION": ChanMeanReversionStrategy(config),
+            "MURPHY_TREND": MurphyTrendStrategy(config),
+            "VOLMAN_PRICE_ACTION": VolmanPriceActionStrategy(config),
+            "LONDON_BREAKOUT": LondonBreakoutStrategy(config),
+            "INTERMARKET_MOMENTUM": IntermarketMomentumStrategy(config),
+        }
+        enabled = config.get("ENABLED_STRATEGIES") or []
+        if isinstance(enabled, str):
+            enabled = [s.strip().upper() for s in enabled.split(",") if s.strip()]
+        if not enabled:
+            return strategies
+        unknown = sorted(set(enabled) - set(strategies))
+        if unknown:
+            log.error(f"[StrategyEngine] ENABLED_STRATEGIES : noms inconnus ignorés {unknown} "
+                      f"(valides : {sorted(strategies)})")
+        selected = {name: strat for name, strat in strategies.items() if name in enabled}
+        if not selected:
+            log.error("[StrategyEngine] Aucune stratégie active après ENABLED_STRATEGIES : aucun trade ne sera pris.")
+        else:
+            log.info(f"[StrategyEngine] Stratégies actives : {sorted(selected)}")
+        return selected
+
+    def configure(self, config: Dict[str, Any]):
+        """
+        Applique la configuration réelle (.env) aux stratégies. Le moteur est créé avant la
+        stratégie de trading, sans config : sans cet appel, chaque stratégie tournait avec ses
+        valeurs codées en dur (SL/TP, seuils) au lieu de celles du .env.
+        """
+        self.config = dict(config or {})
+        self.strategies = self._build_strategies(self.config)
+        for name in self.strategies:
+            self._strategy_stats.setdefault(name, {"trades": 0, "wins": 0, "total_pnl": 0.0})
 
     def select_best_strategy(self, regime: str, session_name: Optional[str] = None, **kwargs) -> Tuple[str, float]:
         """Sélectionne le nom de la meilleure stratégie pour un régime et une session donnés."""
@@ -102,6 +127,20 @@ class StrategyEngine:
         
         log.debug(f"Résultat trade pour {strategy_name} ({symbol}): PnL={pnl:.2f}, total_pnl={stats['total_pnl']:.2f}")
 
+    @staticmethod
+    def effective_score_min(runtime_score_min: Optional[float] = None) -> float:
+        """
+        Seuil de score appliqué aux signaux : max(SCORE_MIN configuré, valeur runtime), plafonné à 10.
+
+        La valeur runtime (RuntimeConfig : session, adaptation, walk-forward, cloud) ne peut
+        donc que rendre le bot PLUS sélectif que le .env, jamais moins. (Auparavant le seuil
+        était lu dans os.environ et toutes ces adaptations étaient ignorées.)
+        """
+        from superbot import config as _cfg
+        floor = float(_cfg.SCORE_MIN)
+        runtime = float(runtime_score_min) if runtime_score_min is not None else floor
+        return min(10.0, max(floor, runtime))
+
     def evaluate(
         self,
         df: pd.DataFrame,
@@ -111,7 +150,8 @@ class StrategyEngine:
         current_price: float = 0.0,
         pip_size: float = 0.0001,
         active_sessions: Optional[List[str]] = None,
-        session_name: Optional[str] = None
+        session_name: Optional[str] = None,
+        score_min: Optional[float] = None
     ) -> SignalResult:
         """
         Évalue les données de marché avec la ou les stratégies les plus pertinentes
@@ -160,7 +200,6 @@ class StrategyEngine:
         # 2. Liste ordonnée des stratégies candidates selon le régime et la session
         candidates: List[str] = self._get_candidate_strategies(regime_type, active_sessions)
         if not candidates:
-            candidates = ["MURPHY_TREND", "VOLMAN_PRICE_ACTION", "CHAN_MEAN_REVERSION"]
             log.info(f"🛡️ [Régime] Aucune stratégie candidate pour {symbol} en régime '{regime_type}'. Pas de trade.")
             return SignalResult(
                 strategy_name="NONE",
@@ -191,20 +230,17 @@ class StrategyEngine:
             except Exception:
                 adapted_params = None
 
-        for idx, strat_name in enumerate(candidates, 1):
+        for strat_name in candidates:
             strat = self.strategies.get(strat_name)
             if not strat:
                 continue
+            learner = getattr(self, 'performance_learner', None)
+            if learner is not None and learner.is_strategy_blocked(strat_name):
+                tested_summaries.append(f"{strat_name} (bloquée : win rate < 30 % sur ≥ 10 trades)")
+                continue
 
             try:
-                sig = strat.analyze(
-                    df=df,
-                    symbol=symbol,
-                    regime=regime,
-                    asset_class=asset_class,
-                    current_price=current_price,
-                    pip_size=pip_size
-                )
+                # Une seule analyse par stratégie (l'appel était auparavant doublé, résultat jeté)
                 if strat_name == "UNIFIED_ALPHA":
                     sig = strat.analyze(
                         df=df,
@@ -230,7 +266,7 @@ class StrategyEngine:
 
                 if has_signal:
                     # Règle "Score Minimum Global" : rejeter les signaux trop faibles
-                    effective_score_min = float(os.environ.get('SCORE_MIN', '8'))
+                    effective_score_min = self.effective_score_min(score_min)
                     if sig.total_score < effective_score_min:
                         tested_summaries.append(
                             f"{strat_name} (signal rejeté: score {sig.total_score:.1f} < {effective_score_min})"
@@ -320,7 +356,6 @@ class StrategyEngine:
         """
         candidates: List[str] = []
 
-        # 1. Régimes de Tendance forte (Bullish / Bearish)
         # 1. Tendance forte — uniquement du trend-following
         if regime_type in ["trending_bull", "trending_bear"]:
             candidates = [
@@ -331,7 +366,6 @@ class StrategyEngine:
                 "VOLMAN_PRICE_ACTION"
             ]
 
-        # 2. Régimes de Range / Oscillations
         # 2. Range — uniquement du mean-reversion
         elif regime_type == "ranging":
             candidates = [
@@ -340,17 +374,12 @@ class StrategyEngine:
                 "VOLMAN_PRICE_ACTION"
             ]
 
-        # 2b. Bruit / Choppy
-        # 3. Bruit / Choppy — aucun trade
-        elif regime_type == "choppy_noise":
+        # 3. Bruit / Choppy et haute volatilité — aucun trade
+        elif regime_type in ("choppy_noise", "high_volatility"):
             candidates = []
 
-        # 3. Régimes de Compression / Breakout
-        # 4. Haute volatilité — trop dangereux, pas de trade
-        elif regime_type == "high_volatility":
-            candidates = []
-
-        # 5. Breakout — London Breakout en session Londres uniquement
+        # 4. Breakout — London Breakout en session Londres/Overlap uniquement
+        #    (hors de ces sessions, pas de breakout fiable : aucun trade)
         elif regime_type in ["pre_breakout", "breakout"]:
             if "LONDON" in active_sessions or "OVERLAP" in active_sessions:
                 candidates = [
@@ -359,26 +388,8 @@ class StrategyEngine:
                     "VOLMAN_PRICE_ACTION",
                     "MURPHY_TREND"
                 ]
-            else:
-                candidates = [
-                    "UNIFIED_ALPHA",
-                    "VOLMAN_PRICE_ACTION",
-                    "MURPHY_TREND",
-                    "CHAN_MEAN_REVERSION"
-                ]
-                # Hors session Londres, pas de breakout fiable
-                candidates = []
 
-        # 4. Haute volatilité
-        elif regime_type == "high_volatility":
-            candidates = [
-                "UNIFIED_ALPHA",
-                "CHAN_MEAN_REVERSION",
-                "INTERMARKET_MOMENTUM",
-                "ELDER_TRIPLE_SCREEN"
-            ]
-
-        # 6. Défaut (régime inconnu) — stratégie la plus conservatrice
+        # 5. Défaut (régime inconnu) — stratégie la plus conservatrice
         else:
             candidates = [
                 "UNIFIED_ALPHA",

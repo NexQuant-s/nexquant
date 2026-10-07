@@ -16,7 +16,6 @@ Mécanisme :
 
 from typing import Dict, Any, Optional, TYPE_CHECKING
 import pandas as pd
-import numpy as np
 
 from superbot.strategy.base_strategy import BaseStrategy, SignalResult
 if TYPE_CHECKING:

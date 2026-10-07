@@ -9,8 +9,8 @@ les instruments traités :
 
 import math
 from datetime import datetime, timezone
-from typing import Dict, Any, Optional, Tuple
-from superbot.config import MT5_CRYPTO_SYMBOLS
+from typing import Dict, Any, Optional
+from superbot.config import MT5_CRYPTO_SYMBOLS  # noqa: F401 — réexporté (orchestrator, tests)
 
 
 # Classification des symboles et alias des courtiers

@@ -23,7 +23,7 @@ import pandas as pd
 from superbot.strategy.base_strategy import BaseStrategy, SignalResult
 if TYPE_CHECKING:
     from superbot.brain.regime_detector import RegimeResult
-from superbot.strategy.knowledge_base import calculate_asian_range
+from superbot.strategy.knowledge_base import calculate_asian_range, utc_bar_times
 
 
 class LondonBreakoutStrategy(BaseStrategy):
@@ -58,7 +58,7 @@ class LondonBreakoutStrategy(BaseStrategy):
         # Vérifier l'heure UTC actuelle
         current_hour = 8
         if hasattr(df.index, 'hour') and len(df.index) > 0:
-            current_hour = df.index[-1].hour
+            current_hour = utc_bar_times(df)[-1].hour  # heure UTC réelle (bougies MT5 en heure serveur)
         elif 'time' in df.columns and pd.api.types.is_datetime64_any_dtype(df['time']):
             current_hour = df['time'].iloc[-1].hour
         else:

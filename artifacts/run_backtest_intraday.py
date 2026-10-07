@@ -18,7 +18,6 @@ sys.path.insert(0, str(ROOT))
 
 os.environ.setdefault("BACKTEST_MODE", "true")
 
-import pandas as pd
 
 # Sortie redirigée → fichier : forcer UTF-8 (sinon cp1252 plante sur « → »).
 for _stream in (sys.stdout, sys.stderr):
@@ -77,7 +76,7 @@ def main() -> int:
     for symbol, timeframe, start, end in RUNS:
         label = f"{symbol} {timeframe}"
         print(f"\n{'=' * 72}\n>>> {label}  ({start} → {end})\n{'=' * 72}")
-        print(f"    Téléchargement des données…")
+        print("    Téléchargement des données…")
         try:
             all_results[label] = run_one(fetcher, symbol, timeframe, start, end)
         except Exception as e:

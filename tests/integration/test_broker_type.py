@@ -30,6 +30,9 @@ def cloud_bot():
              patch("superbot.orchestrator.ENABLE_DASHBOARD", False), \
              patch("superbot.orchestrator.WEBHOOK_ENABLED", False):
             bot = SuperBot()
+            # Les multiplicateurs de session (risque/score selon l'heure UTC) passent désormais
+            # par RuntimeConfig : on les neutralise pour un test indépendant de l'heure.
+            bot.runtime_config.set_session_multipliers(risk_multiplier=1.0, score_offset=0)
             yield bot, mock_create_broker
 
 

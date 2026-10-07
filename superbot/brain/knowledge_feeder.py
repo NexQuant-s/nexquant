@@ -24,9 +24,8 @@ import logging
 import threading
 import time
 import json
-import hashlib
 import re
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 log = logging.getLogger("nexquant.knowledge_feeder")
@@ -186,8 +185,8 @@ class KnowledgeFeeder:
         if self._db:
             try:
                 self._db.purge_expired_knowledge()
-            except Exception:
-                pass
+            except Exception as _exc:
+                log.debug(f"Erreur ignorée (non bloquante) : {_exc}")
 
         self._last_full_ingestion = datetime.now(timezone.utc)
         self._last_news_update = self._last_full_ingestion
@@ -279,7 +278,6 @@ class KnowledgeFeeder:
             return 0
 
         count = 0
-        now = datetime.now(timezone.utc)
         # Ne garder que les events HIGH impact des 3 prochains jours
         for event in events:
             try:
@@ -288,7 +286,7 @@ class KnowledgeFeeder:
                     continue
 
                 event_time_str = event.get('date', '')
-                currency = event.get('currency', '')
+                currency = event.get('currency') or event.get('country', '')  # flux faireconomy : 'country'
                 title = event.get('title', '')
                 forecast = event.get('forecast', '')
                 previous = event.get('previous', '')
@@ -333,7 +331,7 @@ class KnowledgeFeeder:
                     continue
 
                 # CSV : DATE,VALUE
-                lines = [l for l in content.strip().split('\n') if l and not l.startswith('DATE')]
+                lines = [line for line in content.strip().split('\n') if line and not line.startswith('DATE')]
                 if not lines:
                     continue
 

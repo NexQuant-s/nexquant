@@ -21,9 +21,8 @@ Usage :
     fresh = scraper.get_cached(symbol_filter="EUR")
 """
 import logging
-import time
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import List, Dict, Any, Optional
 
 log = logging.getLogger("news.rss_scraper")
@@ -298,14 +297,13 @@ class RssScraper:
     @staticmethod
     def _parse_date(entry) -> Optional[datetime]:
         """Parse la date de publication d'un article RSS."""
-        import time as time_module
         for field in ["published_parsed", "updated_parsed", "created_parsed"]:
             val = entry.get(field)
             if val:
                 try:
                     return datetime(*val[:6])
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log.debug(f"Erreur ignorée (non bloquante) : {_exc}")
         return None
 
     @staticmethod
@@ -321,8 +319,5 @@ class RssScraper:
     @staticmethod
     def _check_feedparser() -> bool:
         """Verifie si feedparser est installe."""
-        try:
-            import feedparser
-            return True
-        except ImportError:
-            return False
+        import importlib.util
+        return importlib.util.find_spec("feedparser") is not None

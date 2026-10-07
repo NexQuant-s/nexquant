@@ -1,7 +1,6 @@
 """
 Tests unitaires pour les spécifications de symboles MT5 (symbol_specs.py)
 """
-import pytest
 from superbot.broker.symbol_specs import (
     normalize_symbol_name,
     get_asset_class,
@@ -9,7 +8,6 @@ from superbot.broker.symbol_specs import (
     is_rollover_period,
     get_active_sessions,
     calculate_lot_size,
-    DEFAULT_SPECS,
 )
 
 

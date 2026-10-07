@@ -18,7 +18,6 @@ Gestion des Stops :
 - TP : Ratio R:R asymétrique (2.5R à 3.5R).
 """
 
-import math
 from typing import Dict, Any, Optional, TYPE_CHECKING
 import pandas as pd
 

@@ -23,7 +23,6 @@
 ╚══════════════════════════════════════════════════════════════════════════════╝
 """
 import logging
-import os
 import threading
 import time
 from datetime import datetime, timezone
@@ -225,8 +224,8 @@ class BugWatchdog:
                     open_positions = getattr(rm, "open_positions", {})
                     bot_positions = getattr(self.bot, "positions", {})
                     diff = len(open_positions) - len(bot_positions)
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log.debug(f"Erreur ignorée (non bloquante) : {_exc}")
 
             if abs(diff) > 2:
                 return (
