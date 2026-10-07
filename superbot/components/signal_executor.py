@@ -357,6 +357,7 @@ def execute_signal_trade(bot, symbol: str, signal_data: dict, df_with_indicators
 
     # 3. Déterminer le stop loss et take profit via le Risk Manager
     atr_value = float(df_with_indicators.iloc[-1].get('atr', 0))
+    hmm_label = signal_data.get('hmm_label', signal_data.get('market_regime', ''))
     strat_levels = _strategy_sl_tp(signal_data, entry_price)
     if strat_levels:
         sl_price, tp_price = strat_levels
@@ -365,7 +366,6 @@ def execute_signal_trade(bot, symbol: str, signal_data: dict, df_with_indicators
     elif atr_value > 0 and bot.risk_manager:
         position_side = "LONG" if signal_data['should_long'] else "SHORT"
         # Passer le régime HMM pour les multiplicateurs adaptatifs.
-        hmm_label = signal_data.get('hmm_label', signal_data.get('market_regime', ''))
         sl_price, tp_price = bot.risk_manager.calculate_sl_tp_levels(
             entry_price, atr_value, position_side,
             asset_type=bot.broker.get_asset_type(),
