@@ -1,7 +1,34 @@
 import argparse
 import os
+import sys
 import time
 import traceback
+
+
+def _acquire_single_instance_lock(broker: str):
+    """Verrou exclusif « une seule instance par broker » (libéré par l'OS même en cas de plantage).
+
+    Deux instances sur le même compte doublaient chaque ordre (constaté le 07/10/2026).
+    Retourne le fichier verrouillé (à garder ouvert pendant toute la vie du processus) ou None
+    si une autre instance tient déjà le verrou.
+    """
+    from superbot.config import LOG_DIR
+    os.makedirs(LOG_DIR, exist_ok=True)
+    lock_path = os.path.join(str(LOG_DIR), f"superbot_{broker.lower()}.lock")
+    handle = open(lock_path, "a+")
+    try:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    return handle
+
 
 def main():
     """Point d'entrée principal du SuperBot avec support multi-broker CLI."""
@@ -19,6 +46,12 @@ def main():
 
     if args.dashboard_port:
         os.environ["DASHBOARD_PORT"] = str(args.dashboard_port)
+
+    instance_lock = _acquire_single_instance_lock(os.environ["BROKER_TYPE"])
+    if instance_lock is None:
+        print(f"❌ Une autre instance du SuperBot [{os.environ['BROKER_TYPE'].upper()}] tourne déjà "
+              "(verrou superbot_<broker>.lock dans le dossier des logs). Arrêtez-la avant d'en lancer une autre.")
+        sys.exit(1)
 
     from superbot.orchestrator import SuperBot
 

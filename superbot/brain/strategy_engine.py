@@ -45,7 +45,7 @@ class StrategyEngine:
             name: {"trades": 0, "wins": 0, "total_pnl": 0.0}
             for name in self.strategies
         }
-        log.info("StrategyEngine MT5 initialisé avec UnifiedAlphaStrategy et 6 stratégies d'élite")
+        log.info(f"StrategyEngine MT5 initialisé ({len(self.strategies)} stratégie(s) chargée(s))")
 
     @staticmethod
     def _build_strategies(config: Dict[str, Any]) -> Dict[str, BaseStrategy]:
@@ -331,7 +331,8 @@ class StrategyEngine:
             f"Ordre différé pour préserver le capital."
         )
         return SignalResult(
-            strategy_name=candidates[0] if candidates else "NONE",
+            # Première stratégie candidate réellement active (et non UNIFIED_ALPHA si elle est désactivée)
+            strategy_name=next((c for c in candidates if c in self.strategies), "NONE"),
             market_regime=regime_type,
             reason="Aucun setup à haute probabilité conforme après test multi-stratégies",
             decision_rationale=no_signal_rationale,
