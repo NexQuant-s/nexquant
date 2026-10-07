@@ -2,13 +2,11 @@
 Tests unitaires pour le client MetaTrader 5 (MT5Client) avec mocks exhaustifs.
 """
 import pytest
-from unittest.mock import MagicMock, patch
-import pandas as pd
+from unittest.mock import patch
 import numpy as np
 from types import SimpleNamespace
 
 from superbot.broker.mt5_client import MT5Client
-from superbot.broker.symbol_specs import DEFAULT_SPECS
 
 
 @pytest.fixture
@@ -111,8 +109,9 @@ class TestMT5Client:
 
         df = client.fetch_candles("EURUSD", "1h", limit=10)
         assert len(df) == 10
-        assert list(df.columns) == ["open", "high", "low", "close", "volume"]
+        assert list(df.columns) == ["open", "high", "low", "close", "volume", "server_utc_offset_s"]
         assert df.index.tz is not None  # UTC timestamp
+
 
     def test_get_spread(self, mock_mt5):
         client = MT5Client(login=123456, password="pw", server="FusionMarkets-Demo")
@@ -217,3 +216,56 @@ class TestMT5Client:
         assert sent_req["type"] == mock_mt5.ORDER_TYPE_SELL
         assert sent_req["volume"] == 0.5
         assert sent_req["position"] == 555
+
+    def test_get_closed_position_converts_server_time_and_aggregates(self, mock_mt5):
+        import time as _time
+        from datetime import datetime, timezone
+
+        client = MT5Client(login=123456, password="pw", server="FusionMarkets-Demo")
+        offset = 3 * 3600  # serveur en UTC+3
+        now = int(_time.time())
+        mock_mt5.symbol_info_tick.side_effect = lambda sym: SimpleNamespace(bid=1.1, ask=1.1001, time=now + offset)
+
+        open_srv, close_srv = now + offset - 7200, now + offset - 600
+        deals = [
+            SimpleNamespace(entry=0, type=0, symbol="EURUSD", price=1.1000, volume=0.05, time=open_srv,
+                            profit=0.0, commission=-0.2, swap=0.0, fee=0.0, reason=3, ticket=1, position_id=777),
+            SimpleNamespace(entry=1, type=1, symbol="EURUSD", price=1.1030, volume=0.05, time=close_srv,
+                            profit=15.0, commission=-0.2, swap=-0.1, fee=0.0, reason=5, ticket=2, position_id=777),
+        ]
+        mock_mt5.history_deals_get.return_value = deals
+
+        trade = client.get_closed_position(777)
+
+        mock_mt5.history_deals_get.assert_called_with(position=777)
+        assert trade["side"] == "buy"
+        assert trade["entry_price"] == pytest.approx(1.1000)
+        assert trade["exit_price"] == pytest.approx(1.1030)
+        assert trade["pnl"] == pytest.approx(14.5)
+        assert trade["close_reason"] == "tp"
+        assert trade["position_id"] == 777
+        # Heure serveur ramenée en UTC
+        assert trade["timestamp"] == datetime.fromtimestamp(close_srv - offset, timezone.utc)
+
+    def test_get_closed_position_returns_none_while_open(self, mock_mt5):
+        client = MT5Client(login=123456, password="pw", server="FusionMarkets-Demo")
+        mock_mt5.history_deals_get.return_value = [
+            SimpleNamespace(entry=0, type=1, symbol="XAUUSD", price=2500.0, volume=0.01, time=1,
+                            profit=0.0, commission=0.0, swap=0.0, fee=0.0, reason=3, ticket=1, position_id=9),
+        ]
+        assert client.get_closed_position(9) is None
+
+    def test_get_trade_history_one_row_per_position(self, mock_mt5):
+        client = MT5Client(login=123456, password="pw", server="FusionMarkets-Demo")
+        mk = lambda **kw: SimpleNamespace(**{"profit": 0.0, "commission": 0.0, "swap": 0.0, "fee": 0.0,
+                                             "reason": 4, "ticket": 0, "volume": 0.01, "symbol": "XAUUSD", **kw})
+        mock_mt5.history_deals_get.return_value = [
+            mk(entry=0, type=1, price=2500.0, time=100, position_id=1),
+            mk(entry=1, type=0, price=2510.0, time=200, position_id=1, profit=-10.0),
+            mk(entry=0, type=0, price=2490.0, time=300, position_id=2),  # encore ouverte
+        ]
+        trades = client.get_trade_history(days=1)
+        assert len(trades) == 1
+        assert trades[0]["side"] == "sell"
+        assert trades[0]["pnl"] == pytest.approx(-10.0)
+        assert trades[0]["close_reason"] == "sl"

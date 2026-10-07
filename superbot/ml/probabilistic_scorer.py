@@ -10,13 +10,12 @@ Online learning : partial_fit() via SGDClassifier wrapper.
 import os
 import numpy as np
 import pandas as pd
-from typing import Optional, Dict, Any, List
+from typing import Dict, List
 import logging
 import joblib
-from sklearn.linear_model import LogisticRegression, SGDClassifier
+from sklearn.linear_model import SGDClassifier
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.preprocessing import StandardScaler
-from sklearn.pipeline import Pipeline
 
 log = logging.getLogger("ml.ensemble_scorer")
 
@@ -60,15 +59,24 @@ def _extract_extended_features(df_row: pd.Series, context: dict = None) -> np.nd
     ctx = context or {}
     close = df_row.get('close', 1) or 1
 
+    def _recorded(key):
+        """Valeur déjà calculée à l'entrée (lignes du journal des trades), sinon None."""
+        value = df_row.get(key)
+        return float(value) if value is not None and pd.notna(value) else None
+
     # Techniques de base
     rsi = float(df_row.get('rsi', 50) or 50)
     macd_hist = float(df_row.get('macd_histogram', df_row.get('macd_hist', 0)) or 0)
     adx = float(df_row.get('adx', 20) or 20)
-    bb_upper = float(df_row.get('bb_upper', close * 1.01) or close * 1.01)
-    bb_lower = float(df_row.get('bb_lower', close * 0.99) or close * 0.99)
-    bb_pos = (close - bb_lower) / (bb_upper - bb_lower) if (bb_upper - bb_lower) > 0 else 0.5
-    atr = float(df_row.get('atr', 0) or 0)
-    atr_pct = (atr / close) * 100 if close > 0 else 0
+    bb_pos = _recorded('bb_pos')
+    if bb_pos is None:
+        bb_upper = float(df_row.get('bb_upper', close * 1.01) or close * 1.01)
+        bb_lower = float(df_row.get('bb_lower', close * 0.99) or close * 0.99)
+        bb_pos = (close - bb_lower) / (bb_upper - bb_lower) if (bb_upper - bb_lower) > 0 else 0.5
+    atr_pct = _recorded('atr_pct')
+    if atr_pct is None:
+        atr = float(df_row.get('atr', 0) or 0)
+        atr_pct = (atr / close) * 100 if close > 0 else 0
 
     # Signaux techniques
     ema_fast = float(df_row.get('ema_fast', close) or close)
@@ -80,18 +88,19 @@ def _extract_extended_features(df_row: pd.Series, context: dict = None) -> np.nd
     vwap = float(df_row.get('vwap', close) or close)
     ichimoku_signal = 1.0 if close > vwap else (-1.0 if close < vwap else 0.0)
     # Volume Z-score
-    volume = float(df_row.get('volume', 1000) or 1000)
     volume_zscore = float(ctx.get('volume_zscore', 0) or 0)
 
-    # Contexte
-    regime_str = str(ctx.get('regime', 'ranging'))
+    # Contexte (régime et heure de l'ENTRÉE si enregistrés, sinon instant présent)
+    regime_str = str(ctx.get('regime') or df_row.get('market_regime') or 'ranging')
     regime_id = float(REGIME_MAP.get(regime_str, 0))
     session_str = str(ctx.get('session', 'LONDON'))
     session_id = float(SESSION_MAP.get(session_str, 3))
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc)
-    hour_of_day = float(now.hour)
-    day_of_week = float(now.weekday())
+    hour_of_day = _recorded('hour_of_day')
+    hour_of_day = float(now.hour) if hour_of_day is None else hour_of_day
+    day_of_week = _recorded('day_of_week')
+    day_of_week = float(now.weekday()) if day_of_week is None else day_of_week
     spread_pips = float(ctx.get('spread_pips', 0.5) or 0.5)
 
     # Sentiment
@@ -124,7 +133,10 @@ class EnsembleScorer:
     Vote pondéré : poids adaptatifs basés sur win_rate des 30 derniers trades.
     """
 
-    def __init__(self, model_path: str = "resources/ensemble_scorer.pkl"):
+    def __init__(self, model_path: str = None):
+        if model_path is None:
+            from superbot.config import ML_MODEL_PATH
+            model_path = ML_MODEL_PATH
         self.model_path = model_path
         self.scaler = StandardScaler()
         self.scaler_fitted = False
@@ -188,24 +200,24 @@ class EnsembleScorer:
                 p = float(self.lr.predict_proba(X_scaled)[0][1])
                 proba_list.append(p)
                 weight_list.append(self.weights[0])
-            except Exception:
-                pass
+            except Exception as _exc:
+                log.debug(f"Erreur ignorée (non bloquante) : {_exc}")
 
         if self.rf_trained:
             try:
                 p = float(self.rf.predict_proba(X_scaled)[0][1])
                 proba_list.append(p)
                 weight_list.append(self.weights[1])
-            except Exception:
-                pass
+            except Exception as _exc:
+                log.debug(f"Erreur ignorée (non bloquante) : {_exc}")
 
         if self.gb_trained:
             try:
                 p = float(self.gb.predict_proba(X_scaled)[0][1])
                 proba_list.append(p)
                 weight_list.append(self.weights[2])
-            except Exception:
-                pass
+            except Exception as _exc:
+                log.debug(f"Erreur ignorée (non bloquante) : {_exc}")
 
         if not proba_list:
             return 0.5
@@ -214,7 +226,7 @@ class EnsembleScorer:
         if total_w <= 0:
             return sum(proba_list) / len(proba_list)
 
-        weighted = sum(p * w for p, w in zip(proba_list, weight_list)) / total_w
+        weighted = sum(p * w for p, w in zip(proba_list, weight_list, strict=True)) / total_w
         return float(weighted)
 
     def partial_fit(self, df_row: pd.Series, target: int, context: dict = None):

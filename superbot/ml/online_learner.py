@@ -6,10 +6,8 @@ Intégration avec le PerformanceLearner pour l'orchestration complète.
 """
 import logging
 import threading
-import time
 from typing import Optional, Dict, Any
 import pandas as pd
-import numpy as np
 
 log = logging.getLogger("ml.online_learner")
 
@@ -59,6 +57,10 @@ class OnlineLearner:
             context: Contexte additionnel (régime, session, sentiment...)
         """
         if self.scorer is None:
+            return
+        if not trade.get('verified', True):
+            # P&L estimé (clôture non retrouvée chez le broker) : ne pas apprendre sur une étiquette douteuse.
+            log.info(f"OnlineLearner: trade {trade.get('symbol')} non vérifié broker — ignoré pour l'apprentissage")
             return
 
         pnl = float(trade.get('pnl', 0) or 0)

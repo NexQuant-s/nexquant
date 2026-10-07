@@ -1,13 +1,9 @@
 """
 ╔═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╩
 """
-import pandas as pd
-import numpy as np
 from typing import Dict, Any, Tuple, List, Optional
 import logging
-from datetime import datetime, timedelta
-import json
-import os
+from datetime import datetime
 import threading
 
 log = logging.getLogger("risk_manager")
@@ -162,8 +158,6 @@ class RiskManager:
 
         if self.day_start_balance > 0:
             daily_loss_pct = abs(min(0, self.daily_pnl)) / self.day_start_balance * 100
-            if daily_loss_pct >= self.MAX_DAILY_LOSS_PCT:
-                log.critical(f"⚠️ KILL-SWITCH ACTIVÉ : Perte journalière ({daily_loss_pct:.2f}%) >= {self.MAX_DAILY_LOSS_PCT}%.")
             effective_max_daily = self.MAX_DAILY_LOSS_PCT
             if self.day_start_balance < 200.0:
                 effective_max_daily = max(self.MAX_DAILY_LOSS_PCT, 15.0)
@@ -175,8 +169,6 @@ class RiskManager:
                 return True
         if self.month_start_balance > 0:
             monthly_loss_pct = abs(min(0, self.monthly_pnl)) / self.month_start_balance * 100
-            if monthly_loss_pct >= self.MAX_MONTHLY_LOSS_PCT:
-                log.critical(f"⚠️ KILL-SWITCH ACTIVÉ : Perte mensuelle ({monthly_loss_pct:.2f}%) >= {self.MAX_MONTHLY_LOSS_PCT}%.")
             effective_max_monthly = self.MAX_MONTHLY_LOSS_PCT
             if self.month_start_balance < 200.0:
                 effective_max_monthly = max(self.MAX_MONTHLY_LOSS_PCT, 25.0)
@@ -335,76 +327,6 @@ class RiskManager:
     # 🧠 V3 : TARGET-AWARE RISK MANAGEMENT
     # =========================================================================
 
-    def auto_adjust_barriers(self, balance: float) -> dict:
-        """
-        Ajuste automatiquement les barrières de risque en fonction du solde.
-        Implémente la logique du plan V3 Phase 7.
-
-        Solde ≥ 5000€  : Target 5% du solde, Risk 1.5%, Max 3 positions
-        Solde ≥ 1000€  : Target 200€,         Risk 1.0%, Max 2 positions
-        Solde ≥  500€  : Target 100€,          Risk 0.8%, Max 2 positions
-        Solde ≥  200€  : Target 40€,           Risk 0.5%, Max 1 position
-        Solde <  200€  : Target 10€,           Risk 0.3%, Mode ultra-conservateur
-
-        Returns: dict avec daily_target, risk_pct, max_positions, score_min
-        """
-        if balance >= 5000:
-            barriers = {
-                'daily_target': balance * 0.05,
-                'risk_pct': 1.5,
-                'max_positions': 3,
-                'score_min': 5,
-                'sl_atr_mult': 1.5,
-                'tp_atr_mult': 3.0,
-            }
-        elif balance >= 1000:
-            barriers = {
-                'daily_target': 200.0,
-                'risk_pct': 1.0,
-                'max_positions': 2,
-                'score_min': 6,
-                'sl_atr_mult': 1.5,
-                'tp_atr_mult': 3.0,
-            }
-        elif balance >= 500:
-            barriers = {
-                'daily_target': 100.0,
-                'risk_pct': 0.8,
-                'max_positions': 2,
-                'score_min': 7,
-                'sl_atr_mult': 1.3,
-                'tp_atr_mult': 2.5,
-            }
-        elif balance >= 200:
-            barriers = {
-                'daily_target': 40.0,
-                'risk_pct': 0.5,
-                'max_positions': 1,
-                'score_min': 8,
-                'sl_atr_mult': 1.2,
-                'tp_atr_mult': 2.0,
-            }
-        else:
-            barriers = {
-                'daily_target': 10.0,
-                'risk_pct': 0.3,
-                'max_positions': 1,
-                'score_min': 9,
-                'sl_atr_mult': 1.0,
-                'tp_atr_mult': 2.0,
-            }
-
-        # Appliquer les nouvelles barrières au RiskManager
-        self.RISK_PCT = barriers['risk_pct']
-        self.MAX_OPEN_POSITIONS = barriers['max_positions']
-        self.daily_target = barriers['daily_target']
-        log.info(
-            f"🧠 auto_adjust_barriers | solde={balance:.0f}€ | "
-            f"target={barriers['daily_target']:.0f}€ | risk={barriers['risk_pct']}% | "
-            f"max_pos={barriers['max_positions']}"
-        )
-        return barriers
-
     def get_target_aware_risk_pct(self, daily_pnl: float, daily_target: float,
                                    base_risk_pct: float = None) -> float:
         """
@@ -462,34 +384,44 @@ class RiskManager:
 
         return round(max(0.1, adjusted), 3)
 
+    # Ratios de régime appliqués aux multiplicateurs de base (tendance = référence 1.0).
+    # Avec la base 1.5/3.0 : range → 1.2/1.8, breakout → 1.8/3.6, haute vol → 2.0/4.0.
+    _REGIME_SL_TP_RATIOS = (
+        ('ranging', 0.8, 0.6),
+        ('breakout', 1.2, 1.2),
+        ('high_vol', 4.0 / 3.0, 4.0 / 3.0),
+        ('volatile', 4.0 / 3.0, 4.0 / 3.0),
+    )
+
     @staticmethod
     def get_regime_sl_tp_multipliers(regime: str, session: str = 'LONDON',
-                                      asset_class: str = 'forex') -> dict:
+                                      asset_class: str = 'forex',
+                                      base_sl: float = 1.5, base_tp: float = 3.0) -> dict:
         """
         Retourne les multiplicateurs SL/TP adaptatifs selon le régime + session + asset class.
-        Implémente la logique du plan V3 Phase 7.
 
-        RANGING  + ASIA     → SL=1.2×ATR, TP=1.8×ATR (objectifs plus petits, rapides)
-        TRENDING + LONDON   → SL=1.5×ATR, TP=3.0×ATR (standard)
-        HIGH_VOL + OVERLAP  → SL=2.0×ATR, TP=4.0×ATR (laisser courir)
-        BREAKOUT + any      → SL=1.8×ATR, TP=3.6×ATR (momentum fort)
+        `base_sl` / `base_tp` = SL_ATR_MULT / TP_ATR_MULT configurés (.env) ; le régime
+        applique un ratio relatif à la tendance (auparavant les valeurs étaient codées en dur
+        et le .env était ignoré pour les ordres live).
+
+        RANGING  → SL=0.8×base, TP=0.6×base (1.2/1.8 avec 1.5/3.0)
+        TRENDING → base (1.5/3.0)
+        HIGH_VOL → ×4/3 (2.0/4.0)
+        BREAKOUT → ×1.2 (1.8/3.6)
         """
-        # Valeurs par défaut
-        sl_mult = 1.5
-        tp_mult = 3.0
+        sl_mult = float(base_sl)
+        tp_mult = float(base_tp)
 
         regime_low = (regime or '').lower()
         session_up = (session or '').upper()
 
-        # Ajustement par régime
-        if 'ranging' in regime_low:
-            sl_mult, tp_mult = 1.2, 1.8
-        elif 'breakout' in regime_low:
-            sl_mult, tp_mult = 1.8, 3.6
-        elif 'high_vol' in regime_low or 'volatile' in regime_low:
-            sl_mult, tp_mult = 2.0, 4.0
-        elif 'trending' in regime_low:
-            sl_mult, tp_mult = 1.5, 3.0
+        # Ajustement par régime (ratios relatifs à la tendance)
+        for key, sl_ratio, tp_ratio in RiskManager._REGIME_SL_TP_RATIOS:
+            if key in regime_low:
+                # arrondi intermédiaire : 1.5 × 1.2 doit valoir exactement 1.8 (pas 1.7999…)
+                sl_mult = round(sl_mult * sl_ratio, 10)
+                tp_mult = round(tp_mult * tp_ratio, 10)
+                break
 
         # Ajustement supplémentaire par session
         if session_up == 'OVERLAP':

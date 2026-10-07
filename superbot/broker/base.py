@@ -4,7 +4,7 @@ Defines the Broker abstract base class and factory.
 """
 import abc
 import pandas as pd
-from typing import Tuple, Dict, Any, Optional, List, Union
+from typing import Dict, Any, List, Optional
 import os
 from dotenv import load_dotenv
 
@@ -176,6 +176,13 @@ class Broker(abc.ABC):
         Par défaut retourne une liste vide si non supporté par le broker.
         """
         return []
+
+    def get_closed_position(self, position_id: int) -> Optional[Dict[str, Any]]:
+        """
+        Retourne le trade clôturé correspondant au ticket de position (vérité broker),
+        ou None si inconnu / non supporté.
+        """
+        return None
 
     def calculate_position_size(self, entry_price: float, sl_price: float,
                                risk_amount: float, leverage: int = 1,

@@ -1,10 +1,9 @@
 """
 ╔══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╩
 """
-import math
 import pandas as pd
 import numpy as np
-from typing import Tuple, List, Dict, Any, Optional
+from typing import Tuple, Dict
 import logging
 
 log = logging.getLogger("strategy.knowledge_base")
@@ -156,35 +155,30 @@ def calculate_supertrend(high: pd.Series, low: pd.Series, close: pd.Series,
         
     atr = calculate_atr(high, low, close, atr_period)
     hl2 = (high + low) / 2
-    upper_band = hl2 + (multiplier * atr)
-    lower_band = hl2 - (multiplier * atr)
+    # Boucle sur des tableaux NumPy : même algorithme qu'avant, mais sans les
+    # affectations Series.iloc[i] (très lentes, appelées à chaque cycle et symbole).
+    upper = (hl2 + (multiplier * atr)).to_numpy(dtype=float, copy=True)
+    lower = (hl2 - (multiplier * atr)).to_numpy(dtype=float, copy=True)
+    c = close.to_numpy(dtype=float)
+    n = len(c)
+    st = np.empty(n, dtype=float)
+    tr = np.empty(n, dtype=int)
+    st[0] = upper[0]
+    tr[0] = 1
 
-    supertrend = pd.Series(index=close.index, dtype=float)
-    trend = pd.Series(index=close.index, dtype=int)
-
-    # Initialisation
-    supertrend.iloc[0] = upper_band.iloc[0]
-    trend.iloc[0] = 1
-
-    for i in range(1, len(close)):
-        if close.iloc[i] <= upper_band.iloc[i-1]:
-            upper_band.iloc[i] = min(upper_band.iloc[i], upper_band.iloc[i-1])
+    for i in range(1, n):
+        if c[i] <= upper[i - 1]:
+            upper[i] = min(upper[i], upper[i - 1])
+        if c[i] >= lower[i - 1]:
+            lower[i] = max(lower[i], lower[i - 1])
+        if c[i] <= st[i - 1]:
+            tr[i] = -1
+            st[i] = upper[i]
         else:
-            upper_band.iloc[i] = upper_band.iloc[i]
+            tr[i] = 1
+            st[i] = lower[i]
 
-        if close.iloc[i] >= lower_band.iloc[i-1]:
-            lower_band.iloc[i] = max(lower_band.iloc[i], lower_band.iloc[i-1])
-        else:
-            lower_band.iloc[i] = lower_band.iloc[i]
-
-        if close.iloc[i] <= supertrend.iloc[i-1]:
-            trend.iloc[i] = -1
-            supertrend.iloc[i] = upper_band.iloc[i]
-        else:
-            trend.iloc[i] = 1
-            supertrend.iloc[i] = lower_band.iloc[i]
-
-    return supertrend, trend
+    return pd.Series(st, index=close.index), pd.Series(tr, index=close.index)
 
 
 def calculate_bollinger_bands(close: pd.Series, period: int = 20, std_dev: float = 2.0) -> Tuple[pd.Series, pd.Series, pd.Series]:
@@ -477,9 +471,22 @@ def get_higher_timeframe_data(df: pd.DataFrame, htf_multiplier: int = 4) -> pd.D
     return df.copy()
 
 
+def utc_bar_times(df: pd.DataFrame):
+    """
+    Horodatages UTC réels des barres. Les bougies MT5 sont indexées en heure serveur
+    (UTC+2/+3) et portent le décalage dans la colonne `server_utc_offset_s` ; sans cette
+    colonne (backtest, données déjà en UTC), l'index est retourné tel quel.
+    """
+    if 'server_utc_offset_s' in df.columns and len(df) > 0:
+        offset = df['server_utc_offset_s'].iloc[-1]
+        if pd.notna(offset) and offset:
+            return df.index - pd.Timedelta(seconds=float(offset))
+    return df.index
+
+
 def calculate_asian_range(df: pd.DataFrame) -> tuple:
     """
-    Calcule le range de la session asiatique (00:00–06:59 UTC).
+    Calcule le range de la session asiatique (00:00–06:59 UTC) du jour UTC courant.
 
     Args:
         df: DataFrame OHLCV avec index DatetimeIndex.
@@ -492,7 +499,8 @@ def calculate_asian_range(df: pd.DataFrame) -> tuple:
         return 0.0, 0.0, 0.0
 
     if hasattr(df.index, 'hour'):
-        asian_mask = (df.index.hour >= 0) & (df.index.hour < 7) & (df.index.date == df.index[-1].date())
+        times = utc_bar_times(df)
+        asian_mask = (times.hour >= 0) & (times.hour < 7) & (times.date == times[-1].date())
         asian_bars = df.loc[asian_mask]
     else:
         asian_bars = pd.DataFrame()

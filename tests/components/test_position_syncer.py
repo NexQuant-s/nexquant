@@ -106,3 +106,71 @@ def test_sync_close_propagates_regime_features_and_broker():
     assert record["rsi"] == 55.0
     assert record["adx"] == 30.0
     assert record["broker"] == "binance"
+    assert record["verified"] is False
+    assert record["close_reason"] == "estimated"
+
+
+def _closing_bot(broker):
+    bot = _open_bot()
+    bot.positions["BTC/USDT"]["strategy_name"] = "MURPHY_TREND"
+    bot.positions["BTC/USDT"]["position_id"] = 4242
+    bot.broker = broker
+    bot.risk_manager = MagicMock()
+    bot.active_broker_type = "mt5"
+    bot._convert_pnl_to_account_currency = lambda symbol, raw_pnl, price: raw_pnl
+    return bot
+
+
+def test_sync_preserves_strategy_name_and_ticket():
+    bot = _open_bot()
+    bot.positions["BTC/USDT"]["strategy_name"] = "MURPHY_TREND"
+    bot.broker._position["ticket"] = 4242
+    sync_positions_with_broker(bot)
+    pos = bot.positions["BTC/USDT"]
+    assert pos["strategy_name"] == "MURPHY_TREND"
+    assert pos["position_id"] == 4242
+
+
+def test_close_uses_exact_broker_position():
+    broker = FakeBroker(position=None, current_price=51000.0)
+    broker.get_closed_position = lambda pid: {
+        "symbol": "BTC/USDT", "side": "buy", "entry_price": 50000.0, "exit_price": 49500.0,
+        "pnl": -12.5, "position_id": pid, "close_reason": "sl",
+    } if pid == 4242 else None
+    bot = _closing_bot(broker)
+
+    sync_positions_with_broker(bot)
+
+    record = bot.risk_manager.record_trade.call_args[0][0]
+    assert record["pnl"] == -12.5
+    assert record["exit_price"] == 49500.0
+    assert record["close_reason"] == "sl"
+    assert record["verified"] is True
+    assert record["position_id"] == 4242
+    assert record["strategy_name"] == "MURPHY_TREND"
+
+
+def test_history_fallback_ignores_other_positions():
+    broker = FakeBroker(position=None, current_price=51000.0)
+    # Clôture plus ancienne du même symbole mais sens et prix d'entrée différents
+    broker.get_trade_history = lambda days=1: [{
+        "symbol": "BTC/USDT", "side": "sell", "entry_price": 48000.0, "exit_price": 47000.0,
+        "pnl": 99.0, "position_id": 1,
+    }]
+    bot = _closing_bot(broker)
+
+    sync_positions_with_broker(bot)
+
+    record = bot.risk_manager.record_trade.call_args[0][0]
+    assert record["pnl"] != 99.0
+    assert record["verified"] is False
+
+
+def test_close_with_invalid_exit_price_is_not_recorded():
+    broker = FakeBroker(position=None, current_price=0.0)
+    bot = _closing_bot(broker)
+
+    sync_positions_with_broker(bot)
+
+    bot.risk_manager.record_trade.assert_not_called()
+    assert "BTC/USDT" not in bot.positions

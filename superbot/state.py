@@ -91,8 +91,11 @@ class StateManager:
                 "last_daily_reset_str": self.last_daily_reset_str
             }
             try:
-                with open(self.filepath, 'w') as f:
+                # Écriture atomique : un arrêt brutal ne laisse jamais un fichier tronqué
+                tmp_path = self.filepath + '.tmp'
+                with open(tmp_path, 'w') as f:
                     json.dump(data, f)
+                os.replace(tmp_path, self.filepath)
             except Exception as e:
                 log.warning(f"Erreur lors de la sauvegarde de l'état : {e}")
 

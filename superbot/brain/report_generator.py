@@ -31,8 +31,10 @@ class ReportGenerator:
         self.performance_learner = performance_learner
         self.knowledge_feeder = knowledge_feeder
         self.bot = bot
-        if reports_dir:
-            self.REPORTS_DIR = reports_dir
+        if not reports_dir:
+            from superbot.config import REPORTS_DIR
+            reports_dir = REPORTS_DIR
+        self.REPORTS_DIR = reports_dir
         self._timer: Optional[threading.Timer] = None
         self._running = False
         self._lock = threading.RLock()
@@ -204,7 +206,7 @@ class ReportGenerator:
         Détaille chaque session de la journée avec le Pourquoi et Comment des décisions.
         """
         if isinstance(target_date, bool):
-            force = target_date
+            # Compatibilité : ancien appel generate_daily_report(True)
             target_date = None
 
         now_utc = datetime.now(timezone.utc)
@@ -232,8 +234,8 @@ class ReportGenerator:
                 balance_start = float(progress.get('balance_start', 0.0))
                 balance_end = balance_start + achieved
                 pct = float(progress.get('achievement_pct', 0.0))
-            except Exception:
-                pass
+            except Exception as _exc:
+                log.debug(f"Erreur ignorée (non bloquante) : {_exc}")
         elif self.bot:
             balance_end = getattr(self.bot, '_cached_balance', 0.0)
             balance_start = getattr(self.bot, 'initial_balance', balance_end)
@@ -244,7 +246,7 @@ class ReportGenerator:
 
         lines.append("| Métrique | Valeur |")
         lines.append("|---|---|")
-        lines.append(f"| **Cible Capital Session (Visée)** | **35.00 € à 40.00 €** |")
+        lines.append("| **Cible Capital Session (Visée)** | **35.00 € à 40.00 €** |")
         lines.append(f"| **Objectif Gain PnL** | {target:.2f} € |")
         lines.append(f"| **PnL Réalisé Jour** | **{achieved:+.2f} €** ({pct:.1f}%) |")
         lines.append(f"| **Solde Début Jour** | {balance_start:.2f} € |")

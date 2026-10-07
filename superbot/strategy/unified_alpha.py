@@ -13,9 +13,8 @@ Symétrie directionnelle totale Achat / Vente sur l'Or (XAUUSD) et les devises m
 """
 
 from __future__ import annotations
-import math
 import logging
-from typing import Dict, Any, Optional, Tuple, List, TYPE_CHECKING
+from typing import Dict, Any, Optional, List, TYPE_CHECKING
 import pandas as pd
 import numpy as np
 
@@ -175,7 +174,6 @@ class UnifiedAlphaStrategy(BaseStrategy):
         # ── 2. EXTRACTION DES INDICATEURS CLÉS DES 6 PILIERS ──────────────────
         ema_21 = float(last.get('ema_21', last.get('ema_fast', close)))
         ema_55 = float(last.get('ema_55', last.get('ema_slow', close)))
-        ema_200 = float(last.get('ema_trend', close))
 
         rsi = float(last.get('rsi', 50.0))
         adx = float(last.get('adx', 20.0))
@@ -191,14 +189,16 @@ class UnifiedAlphaStrategy(BaseStrategy):
         prev_macd_hist = float(prev.get('macd_hist', prev.get('macd_histogram', 0.0)))
 
         bb_upper = float(last.get('bb_upper', close + 2 * atr))
-        bb_lower = float(last.get('bb_lower', close - 2 * atr))
         bb_middle = float(last.get('bb_middle', close))
         bb_std = (bb_upper - bb_middle) / 2.0 if (bb_upper - bb_middle) > 0 else atr
         z_score = (close - bb_middle) / bb_std if bb_std > 0 else 0.0
 
         # Donchian 20
-        donch_u = float(prev.get('donchian_upper_20', df['high'].rolling(20).max().iloc[-2]))
-        donch_l = float(prev.get('donchian_lower_20', df['low'].rolling(20).min().iloc[-2]))
+        # (fenêtre de 20 barres se terminant sur la barre précédente ; calculée seulement si absente)
+        donch_u = prev.get('donchian_upper_20')
+        donch_l = prev.get('donchian_lower_20')
+        donch_u = float(df['high'].iloc[-21:-1].max() if donch_u is None else donch_u)
+        donch_l = float(df['low'].iloc[-21:-1].min() if donch_l is None else donch_l)
 
         # Momentum Multi-Périodes (ROC 6 et 12)
         roc_6 = (close - df['close'].iloc[-7]) / df['close'].iloc[-7] * 100 if len(df) >= 7 else 0.0

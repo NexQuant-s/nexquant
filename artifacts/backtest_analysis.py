@@ -1,9 +1,5 @@
-import os
 import sys
 import logging
-import pandas as pd
-import numpy as np
-from datetime import datetime
 
 # Set nexquant directory in python path
 sys.path.insert(0, r"c:\Users\Pavillon\Desktop\nexquant_v2\nexquant")
@@ -26,9 +22,9 @@ from superbot.risk.risk_manager import RiskManager
 config_dict = {k: getattr(config, k) for k in dir(config) if k.isupper()}
 
 def run_backtest_for_broker(broker_type, symbol, limit=250):
-    print(f"\n=======================================================")
+    print("\n=======================================================")
     print(f"RUNNING HISTORICAL BACKTEST FOR {broker_type.upper()} ({symbol})")
-    print(f"=======================================================")
+    print("=======================================================")
     
     try:
         broker = create_broker(broker_type)
@@ -45,7 +41,7 @@ def run_backtest_for_broker(broker_type, symbol, limit=250):
         risk_manager = RiskManager(config_dict)
         
         # Pre-compute all indicators once to speed up trailing stop ATR lookups
-        print(f"[*] Pre-computing technical indicators...")
+        print("[*] Pre-computing technical indicators...")
         df_indicators = strategy.indicators.calculate_all_indicators(df.copy())
         
         # Virtual account states

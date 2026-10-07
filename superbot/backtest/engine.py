@@ -362,7 +362,7 @@ class BacktestEngine:
                 hit_tp = bar['high'] >= tp
                 if hit_sl or hit_tp:
                     exit_price = sl if hit_sl else tp
-                    if hit_tp:
+                    if hit_tp and not hit_sl:  # SL+TP dans la même bougie : sortie au SL (pire cas)
                         result_type = 'TP'
                     elif be_triggered:
                         result_type = 'BREAK_EVEN'
@@ -388,7 +388,7 @@ class BacktestEngine:
                 hit_tp = bar['low'] <= tp
                 if hit_sl or hit_tp:
                     exit_price = sl if hit_sl else tp
-                    if hit_tp:
+                    if hit_tp and not hit_sl:  # SL+TP dans la même bougie : sortie au SL (pire cas)
                         result_type = 'TP'
                     elif be_triggered:
                         result_type = 'BREAK_EVEN'
@@ -411,7 +411,9 @@ class BacktestEngine:
 
             # ── Signal d'entrée (uniquement si pas de position ouverte) ────────
             if position is None:
-                historical_slice = self.df.iloc[:i + 1]
+                # df_full (avec indicateurs), comme en live : self.df ne contient que l'OHLCV brut,
+                # ce qui privait toutes les stratégies d'ADX/EMA/Bollinger (régimes faux, aucune tendance)
+                historical_slice = df_full.iloc[:i + 1]
                 try:
                     signal = strategy.analyze_market(historical_slice, account_balance=balance)
                 except Exception as e:
@@ -566,8 +568,8 @@ class BacktestEngine:
                     tf_seconds = self._timeframe_seconds()
                     if tf_seconds > 0:
                         durations.append(dur / tf_seconds)
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log.debug(f"Erreur ignorée (non bloquante) : {_exc}")
         avg_duration = np.mean(durations) if durations else 0.0
 
         # Ratio R:R réalisé moyen

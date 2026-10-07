@@ -1,6 +1,5 @@
 import pytest
-from unittest.mock import MagicMock, patch
-import time
+from unittest.mock import patch
 from superbot.orchestrator import SuperBot
 
 class FakeBroker:

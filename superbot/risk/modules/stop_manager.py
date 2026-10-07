@@ -1,9 +1,5 @@
 import logging
-import pandas as pd
-import numpy as np
-from datetime import datetime, timezone
-import math
-from typing import Dict, Any, Tuple, Optional
+from typing import Dict, Any, Tuple
 log = logging.getLogger(__name__)
 
 def calculate_sl_tp_levels(rm, entry_price: float, atr_value: float,
@@ -53,7 +49,10 @@ def calculate_sl_tp_levels(rm, entry_price: float, atr_value: float,
 
     # 🧠 V3 : Smart SL/TP multipliers (Target-Aware)
     if hasattr(rm, 'get_regime_sl_tp_multipliers'):
-        mults = rm.get_regime_sl_tp_multipliers(regime=hmm_regime, asset_class=effective_asset_type)
+        mults = rm.get_regime_sl_tp_multipliers(
+            regime=hmm_regime, asset_class=effective_asset_type,
+            base_sl=getattr(rm, 'SL_ATR_MULT', 1.5), base_tp=getattr(rm, 'TP_ATR_MULT', 3.0),
+        )
         sl_mult = mults.get('sl_atr_mult', 1.5)
         tp_mult = mults.get('tp_atr_mult', 3.0)
     else:
@@ -151,7 +150,6 @@ def _check_trailing_stop(rm, symbol: str, position: Dict[str, Any], current_pric
             return
 
         entry_price = position.get('entry_price', 0)
-        activate_mult = getattr(rm, 'TRAIL_ACTIVATE_ATR_MULT', 2.0)
         activate_mult = getattr(rm, 'TRAIL_ACTIVATE_ATR_MULT', 1.0)
 
         if position['side'] == 'LONG':

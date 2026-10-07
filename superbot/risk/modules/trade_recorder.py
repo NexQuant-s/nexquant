@@ -1,11 +1,8 @@
 import logging
 import os
 import json
-import pandas as pd
-import numpy as np
 from datetime import datetime, timezone
-import math
-from typing import Dict, Any, Tuple, Optional, List
+from typing import Dict, Any, List
 log = logging.getLogger(__name__)
 
 
@@ -121,65 +118,137 @@ def load_trade_history_from_disk(rm):
     except Exception as e:
         log.error(f"Erreur lors du chargement de l'historique de trades : {e}")
 
+# Fenêtre de rapprochement d'une ligne « bot » (sans ticket) avec un trade broker.
+# Large car les anciennes lignes broker étaient horodatées en heure serveur (UTC+2/+3).
+_MATCH_WINDOW_SECONDS = 6 * 3600
+# Champs qui font foi côté broker (écrasent l'estimation du bot)
+_BROKER_TRUTH_FIELDS = ('entry_price', 'exit_price', 'pnl', 'size', 'timestamp', 'open_time',
+                        'close_reason', 'ticket', 'position_id')
+
+
+def _parse_ts(value) -> datetime:
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        try:
+            dt = datetime.fromisoformat(str(value).replace('Z', '+00:00'))
+        except ValueError:
+            return datetime.min.replace(tzinfo=timezone.utc)
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _same_trade(row: Dict[str, Any], ref: Dict[str, Any]) -> bool:
+    """Même symbole, même sens, même prix d'entrée et clôtures proches dans le temps."""
+    entry = float(ref.get('entry_price') or 0.0)
+    if (row.get('symbol') != ref.get('symbol') or row.get('side') != ref.get('side') or entry <= 0
+            or abs(float(row.get('entry_price') or 0.0) - entry) > entry * 1e-5):
+        return False
+    gap = abs((_parse_ts(row.get('timestamp')) - _parse_ts(ref.get('timestamp'))).total_seconds())
+    return gap <= _MATCH_WINDOW_SECONDS
+
+
+def _apply_broker_truth(row: Dict[str, Any], broker_trade: Dict[str, Any]):
+    for key in _BROKER_TRUTH_FIELDS:
+        if broker_trade.get(key) is not None:
+            row[key] = broker_trade[key]
+    for key in ('symbol', 'side'):
+        row.setdefault(key, broker_trade.get(key))
+    row['status'] = 'closed'
+    row['verified'] = True
+    row['target'] = 1 if float(row.get('pnl') or 0.0) > 0 else 0
+
+
+def dedupe_trade_rows(rows: List[Dict[str, Any]], broker_trades: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Réconcilie le journal local avec les trades broker (une ligne par position).
+
+    - Ligne déjà liée au même `position_id` : mise à jour avec la vérité broker.
+    - Ligne « bot » sans ticket correspondant au trade : enrichie (elle garde ses features ML).
+    - Sinon le trade broker est ajouté.
+    Les anciens doublons (ligne bot + ligne broker du même trade) sont fusionnés.
+    """
+    rows = [dict(r) for r in rows]
+    by_pid = {r['position_id']: r for r in rows if r.get('position_id')}
+
+    for bt in broker_trades:
+        bt = dict(bt)
+        for key in ('timestamp', 'open_time'):
+            if isinstance(bt.get(key), datetime):
+                bt[key] = bt[key].isoformat()
+        pid = bt.get('position_id')
+        target = by_pid.get(pid) if pid else None
+        if target is None:
+            candidates = [r for r in rows if not r.get('position_id') and _same_trade(r, bt)]
+            if candidates:
+                ts = _parse_ts(bt.get('timestamp'))
+                target = min(candidates, key=lambda r: abs((_parse_ts(r.get('timestamp')) - ts).total_seconds()))
+        if target is None:
+            target = {}
+            rows.append(target)
+        _apply_broker_truth(target, bt)
+        if pid:
+            by_pid[pid] = target
+
+    # Fusionner les lignes bot orphelines dans la ligne broker du même trade (doublons historiques)
+    merged_ids = set()
+    for row in rows:
+        if row.get('position_id'):
+            continue
+        twin = next((r for r in by_pid.values() if id(r) not in merged_ids and _same_trade(r, row)), None)
+        if twin is not None:
+            for key, value in row.items():
+                if key not in twin or twin[key] is None:
+                    twin[key] = value
+            merged_ids.add(id(twin))
+            row['_drop'] = True
+
+    rows = [r for r in rows if not r.pop('_drop', False)]
+    rows.sort(key=lambda r: _parse_ts(r.get('timestamp')))
+    return rows
+
+
 def merge_broker_history(rm, broker_trades: List[Dict[str, Any]]):
     """
-    Fusionne l'historique du broker avec l'historique local en évitant les doublons.
+    Fusionne l'historique du broker avec le journal local (sans doublons ni troncature).
+
+    Le fichier JSONL conserve l'intégralité de l'historique ; seule la mémoire est
+    limitée aux 500 derniers trades.
     """
     if not broker_trades:
         return
 
-    # Créer un ensemble d'identifiants uniques pour les trades locaux existants
-    existing_keys = set()
-    for t in rm.trade_history:
-        ts = t.get('timestamp', '')
-        if isinstance(ts, str) and 'T' in ts:
-            ts = ts.split('.')[0]  # ignorer les microsecondes
-        key = (t.get('symbol'), t.get('side'), ts)
-        existing_keys.add(key)
+    from superbot.config import TRADE_LOG_FILE
+    trades_file = str(TRADE_LOG_FILE)
 
-    new_trades = []
-    for t in broker_trades:
-        ts = t.get('timestamp')
-        if isinstance(ts, datetime):
-            ts_str = ts.isoformat().split('.')[0]
-            t_copy = t.copy()
-            t_copy['timestamp'] = ts.isoformat()
-        elif isinstance(ts, str):
-            ts_str = ts.split('.')[0]
-            t_copy = t.copy()
+    with rm._history_lock:
+        rows = []
+        if os.path.exists(trades_file):
+            with open(trades_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if line.strip():
+                        try:
+                            rows.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            log.warning("Ligne illisible ignorée dans le journal des trades.")
         else:
-            ts_str = str(ts)
-            t_copy = t.copy()
+            rows = list(rm.trade_history)
 
-        t_copy.setdefault('status', 'closed')
-        key = (t_copy.get('symbol'), t_copy.get('side'), ts_str)
-        if key not in existing_keys:
-            new_trades.append(t_copy)
-            existing_keys.add(key)
+        before = len(rows)
+        rows = dedupe_trade_rows(rows, broker_trades)
 
-    # Ajouter les nouveaux trades et retrier par timestamp
-    rm.trade_history.extend(new_trades)
+        try:
+            os.makedirs(os.path.dirname(trades_file), exist_ok=True)
+            tmp_file = trades_file + '.tmp'
+            with open(tmp_file, 'w', encoding='utf-8') as f:
+                for t in rows:
+                    f.write(json.dumps(t, ensure_ascii=False, default=str) + '\n')
+            os.replace(tmp_file, trades_file)  # écriture atomique
+        except Exception as e:
+            log.error(f"Erreur lors de la sauvegarde post-fusion: {e}")
 
-    # S'assurer que le timestamp est analysable pour le tri
-    def get_ts(x):
-        return x.get('timestamp', '')
+        rm.trade_history = [t for t in rows if t.get('status') == 'closed' and t.get('pnl') is not None][-500:]
 
-    rm.trade_history.sort(key=get_ts)
-
-    # Garder seulement les 500 derniers pour la sécurité mémoire
-    # (la BD SQLite est la vraie source de vérité)
-    if len(rm.trade_history) > 500:
-        rm.trade_history = rm.trade_history[-500:]
-
-    try:
-        from superbot.config import TRADE_LOG_FILE
-        trades_file = str(TRADE_LOG_FILE)
-        log_dir = os.path.dirname(trades_file)
-        os.makedirs(log_dir, exist_ok=True)
-        with open(trades_file, 'w', encoding='utf-8') as f:
-            for t in rm.trade_history:
-                f.write(json.dumps(t, ensure_ascii=False, default=str) + '\n')
-    except Exception as e:
-        log.error(f"Erreur lors de la sauvegarde post-fusion: {e}")
-
-    log.info(f"Fusion de l'historique broker terminée. Total trades en mémoire : {len(rm.trade_history)}")
+    log.info(
+        f"Fusion de l'historique broker terminée : {before} → {len(rows)} lignes dans le journal, "
+        f"{sum(1 for t in rows if t.get('verified'))} vérifiées broker."
+    )

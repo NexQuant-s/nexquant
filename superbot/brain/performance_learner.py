@@ -28,10 +28,9 @@ Logique :
 
 import logging
 import threading
-import time
 import json
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 log = logging.getLogger("nexquant.performance_learner")
 
@@ -79,6 +78,7 @@ class PerformanceLearner:
         # Mode défensif (activé en cas de pertes importantes)
         self._defensive_mode: bool = False
         self._defensive_until: Optional[datetime] = None
+        self._profit_protection: bool = False  # risque réduit après +150 % de l'objectif du jour
 
         # Blocages dynamiques (symboles et stratégies)
         self._blocked_strategies: Dict[str, datetime] = {}  # strategy -> blocked_until
@@ -104,29 +104,20 @@ class PerformanceLearner:
         avg_rr = float(stats.get('avg_rr') or 2.0)
         total_trades = int(stats.get('total_trades') or 0)
 
-        # 2. Adapter le score_min selon le WinRate
         # 2. Adapter le score_min selon le WinRate (calibré depuis la base 6.0)
         if total_trades >= 10:
             old_score = self._current_params.get('score_min', 6)
             base_score = 6.0
             if win_rate < 35:
-                new_score = min(9, old_score + 1)
-                reason = f"WinRate faible ({win_rate:.0f}%) → plus sélectif"
                 new_score = min(7.0, base_score + 1.0)
                 reason = f"WinRate faible ({win_rate:.0f}%) → sélectivité renforcée (score=7.0)"
             elif win_rate < 45:
-                new_score = min(8, old_score + 0.5)
-                reason = f"WinRate en dessous de 45% ({win_rate:.0f}%) → légèrement plus sélectif"
                 new_score = min(6.5, base_score + 0.5)
                 reason = f"WinRate modéré ({win_rate:.0f}%) → légère sélectivité (score=6.5)"
             elif win_rate > 65:
-                new_score = max(5, old_score - 0.5)
-                reason = f"WinRate élevé ({win_rate:.0f}%) → exploiter la vague"
                 new_score = max(5.5, base_score - 0.5)
                 reason = f"WinRate élevé ({win_rate:.0f}%) → opportunisme actif (score=5.5)"
             else:
-                new_score = old_score
-                reason = "WinRate stable"
                 new_score = base_score
                 reason = "WinRate équilibré (score=6.0)"
 
@@ -161,8 +152,8 @@ class PerformanceLearner:
                     'relevance_score': 1.0,
                     'assets_mentioned': [],
                 })
-            except Exception:
-                pass
+            except Exception as _exc:
+                log.debug(f"Erreur ignorée (non bloquante) : {_exc}")
 
         log.info(
             f"✅ [PRÉ-SESSION] WR={win_rate:.0f}% | avg_RR={avg_rr:.2f} | "
@@ -180,30 +171,29 @@ class PerformanceLearner:
         actions = {}
         pnl_ratio = current_pnl / target_pnl if target_pnl > 0 else 0
 
-        # Objectif dépassé → protéger les gains
+        # Les multiplicateurs sont FIXES (idempotents) : l'ancienne version multipliait le
+        # risque à chaque appel (toutes les 30 min), ce qui l'écrasait vers 0.
+        # Objectif dépassé → protéger les gains (jusqu'au reset journalier)
         if pnl_ratio >= 1.5:
-            old_risk = self._current_params.get('risk_pct', 1.0)
-            new_risk = old_risk * 0.5
-            self._log_adjustment('risk_pct', old_risk, new_risk,
-                                 f"PnL={current_pnl:.0f}€ dépasse 150% target → protection des gains", 'mid_session', balance, current_pnl)
-            self._current_params['risk_pct'] = new_risk
-            actions['risk_pct'] = new_risk
+            if not self._profit_protection:
+                self._profit_protection = True
+                self._log_adjustment('risk_multiplier', 1.0, self.PROFIT_PROTECTION_MULT,
+                                     f"PnL={current_pnl:.0f}€ dépasse 150% target → protection des gains",
+                                     'mid_session', balance, current_pnl)
+                log.info(f"💰 [MID-SESSION] Objectif dépassé de 150% → risque ×{self.PROFIT_PROTECTION_MULT}")
             actions['action'] = 'REDUCE_RISK_PROFIT_PROTECTION'
-            log.info(f"💰 [MID-SESSION] Objectif dépassé de 150% ! risk_pct: {old_risk:.2f}% → {new_risk:.2f}%")
 
-        # Pertes importantes → mode défensif
+        # Pertes importantes → mode défensif (3 h, non prolongé tant qu'il est actif)
         elif pnl_ratio <= -0.5:
-            self._defensive_mode = True
-            self._defensive_until = datetime.now(timezone.utc) + timedelta(hours=3)
-            old_risk = self._current_params.get('risk_pct', 1.0)
-            new_risk = old_risk * 0.3
-            self._log_adjustment('risk_pct', old_risk, new_risk,
-                                 f"PnL={current_pnl:.0f}€ → pertes 50% target → mode défensif", 'mid_session', balance, current_pnl)
-            self._current_params['risk_pct'] = new_risk
-            actions['risk_pct'] = new_risk
+            if not self.is_defensive():
+                self._defensive_mode = True
+                self._defensive_until = datetime.now(timezone.utc) + timedelta(hours=3)
+                self._log_adjustment('risk_multiplier', 1.0, self.DEFENSIVE_MULT,
+                                     f"PnL={current_pnl:.0f}€ → pertes 50% target → mode défensif",
+                                     'mid_session', balance, current_pnl)
+                log.warning(f"⚠️ [MID-SESSION] Mode défensif activé 3 h | PnL={current_pnl:.0f}€ | risque ×{self.DEFENSIVE_MULT}")
             actions['action'] = 'DEFENSIVE_MODE_ACTIVATED'
             actions['defensive_until'] = self._defensive_until.isoformat()
-            log.warning(f"⚠️ [MID-SESSION] Mode défensif activé | PnL={current_pnl:.0f}€ | risk_pct→{new_risk:.2f}%")
 
         # Performance légèrement en dessous → légère correction
         elif pnl_ratio < 0.3 and len(self._session_trades) >= 5:
@@ -219,8 +209,37 @@ class PerformanceLearner:
                     actions['score_min'] = new_score
                     actions['action'] = 'INCREASE_SELECTIVITY'
 
+        actions['risk_multiplier'] = self.get_risk_multiplier()
         actions['current_params'] = dict(self._current_params)
         return actions
+
+    # Multiplicateurs de risque appliqués au dimensionnement (signal_executor)
+    DEFENSIVE_MULT = 0.3
+    PROFIT_PROTECTION_MULT = 0.5
+
+    def is_defensive(self) -> bool:
+        """Mode défensif actif (expire automatiquement après `_defensive_until`)."""
+        if self._defensive_mode and self._defensive_until and datetime.now(timezone.utc) >= self._defensive_until:
+            self._defensive_mode = False
+            self._defensive_until = None
+            log.info("✅ Mode défensif expiré")
+        return self._defensive_mode
+
+    def get_risk_multiplier(self) -> float:
+        """Multiplicateur de risque courant : 0.3 en mode défensif, 0.5 en protection des gains, sinon 1."""
+        if self.is_defensive():
+            return self.DEFENSIVE_MULT
+        if self._profit_protection:
+            return self.PROFIT_PROTECTION_MULT
+        return 1.0
+
+    def reset_daily(self):
+        """Remise à zéro journalière des protections intra-journée et des trades de session."""
+        with self._lock:
+            self._defensive_mode = False
+            self._defensive_until = None
+            self._profit_protection = False
+            self._session_trades = []
 
     def post_session_debrief(self, session_stats: Dict) -> Dict[str, Any]:
         """
@@ -239,7 +258,6 @@ class PerformanceLearner:
         # 1. Calculer les métriques
         if trades:
             wins = [t for t in trades if t.get('pnl', 0) > 0]
-            losses = [t for t in trades if t.get('pnl', 0) <= 0]
             win_rate = len(wins) / len(trades) * 100
             avg_rr = sum(t.get('rr_ratio', 0) for t in trades) / len(trades)
             best_symbol = max(trades, key=lambda t: t.get('pnl', 0)).get('symbol', '') if trades else ''
@@ -254,7 +272,8 @@ class PerformanceLearner:
             # 2. Mettre à jour les profils de symboles
             self._update_symbol_profiles(trades)
 
-            # 3. Mettre à jour les stats de stratégies
+            # 3. Blocage des stratégies sous-performantes. Les résultats sont déjà enregistrés
+            # trade par trade dans on_trade_closed() : ne pas les ré-enregistrer (double comptage).
             self._update_strategy_stats(trades)
 
             # 4. Pertes consécutives : les compteurs sont déjà maintenus par on_trade_closed() ;
@@ -267,19 +286,8 @@ class PerformanceLearner:
         else:
             next_insights.append(f"⚠️ Objectif non atteint ({pnl_total:.0f}€/{target:.0f}€)")
 
-        # 6. Reset du risk_pct si mode normal à la fin de session
-        if not self._defensive_mode:
-            # Restaurer progressivement le risk_pct si on avait réduit
-            old_risk = self._current_params.get('risk_pct', 1.0)
-            # Restaurer le risque jusqu'à 1.0 (risque de base).
-            if old_risk < 1.0:
-                # Restauration volontairement conservatrice (x1.5 par session). 
-                # S'il était tombé à 0.3%, il faudra ~3 sessions positives pour revenir à 1.0%.
-                new_risk = min(1.0, old_risk * 1.5)
-                self._log_adjustment('risk_pct', old_risk, new_risk, 'Restauration post-session', 'post_session')
-                self._current_params['risk_pct'] = new_risk
-                next_insights.append(f"🔄 risk_pct restauré: {old_risk:.2f}% → {new_risk:.2f}%")
-
+        # 6. Le multiplicateur de risque (défensif / protection) expire seul (3 h) ou au reset journalier
+        insights['risk_multiplier'] = self.get_risk_multiplier()
         insights['next_session_insights'] = next_insights
 
         # 7. Stocker le débrief en DB
@@ -292,8 +300,8 @@ class PerformanceLearner:
                     'relevance_score': 1.0,
                     'assets_mentioned': [],
                 })
-            except Exception:
-                pass
+            except Exception as _exc:
+                log.debug(f"Erreur ignorée (non bloquante) : {_exc}")
 
         log.info(
             f"✅ [POST-SESSION] {session_name} | PnL={pnl_total:.0f}€ | "
@@ -328,7 +336,7 @@ class PerformanceLearner:
             count = self._symbol_consecutive_losses[symbol]['count']
             if count >= 2:
                 self._symbol_consecutive_losses[symbol]['blocked_at'] = datetime.now(timezone.utc)
-                log.warning(f"🚫 {symbol} : {count} pertes consécutives → blocage automatique 24h")
+                log.warning(f"🚫 {symbol} : {count} pertes consécutives → pause automatique de 10 min")
                 diag = self.diagnose_consecutive_losses(symbol, trade)
                 log.warning(
                     f"⏸️ [Pause 10 min] {symbol} : {count} pertes consécutives -> pause ciblée de 10 minutes. "
@@ -339,9 +347,10 @@ class PerformanceLearner:
             if symbol in self._symbol_adapted_params:
                 del self._symbol_adapted_params[symbol]
 
-        # Mise à jour de la stratégie
+        # Mise à jour de la stratégie + blocage éventuel des stratégies sous-performantes
         if self._strategy_engine:
             self._strategy_engine.record_trade_result(strategy, symbol, pnl, rr)
+            self._update_strategy_stats()
 
         # Mise à jour DB
         if self._db:
@@ -367,8 +376,8 @@ class PerformanceLearner:
             try:
                 stats = self._db.get_performance_stats(days=14)
                 return stats
-            except Exception:
-                pass
+            except Exception as _exc:
+                log.debug(f"Erreur ignorée (non bloquante) : {_exc}")
         # Fallback : calcul depuis les trades en mémoire
         trades = self._session_trades[-n_trades:] if self._session_trades else []
         if not trades:
@@ -388,8 +397,8 @@ class PerformanceLearner:
                 if sessions:
                     best = max(sessions, key=lambda s: s.get('pnl_total') or 0)
                     return best.get('session_name', 'LONDON')
-            except Exception:
-                pass
+            except Exception as _exc:
+                log.debug(f"Erreur ignorée (non bloquante) : {_exc}")
         return 'LONDON'  # Défaut
 
     def _get_blocked_symbols(self) -> set:
@@ -430,17 +439,14 @@ class PerformanceLearner:
             except Exception as e:
                 log.debug(f"Symbol profile update error {sym}: {e}")
 
-    def _update_strategy_stats(self, trades: List[Dict]):
-        """Met à jour les stats de stratégies via StrategyEngine."""
+    def _update_strategy_stats(self, trades: List[Dict] = None):
+        """
+        Bloque 7 jours les stratégies sous-performantes (≥ 10 trades et WR < 30 %).
+        Les résultats sont enregistrés trade par trade par on_trade_closed() ; `trades` n'est
+        plus ré-enregistré ici (il était compté deux fois).
+        """
         if not self._strategy_engine:
             return
-        for trade in trades:
-            strategy = trade.get('strategy_name', 'TREND_FOLLOW_EMA')
-            symbol = trade.get('symbol', '')
-            pnl = trade.get('pnl', 0)
-            rr = trade.get('rr_ratio', 0)
-            self._strategy_engine.record_trade_result(strategy, symbol, pnl, rr)
-            
         leaderboard = self._strategy_engine.get_strategy_leaderboard()
         for stat in leaderboard:
             strat_name = stat['name']
@@ -485,8 +491,8 @@ class PerformanceLearner:
                     param_name=param, old_value=old_val, new_value=new_val,
                     reason=reason, trigger=trigger, balance=balance, pnl_trigger=pnl
                 )
-            except Exception:
-                pass
+            except Exception as _exc:
+                log.debug(f"Erreur ignorée (non bloquante) : {_exc}")
 
     # ─────────────────────────────────────────────────────────────────────────
     # API PUBLIQUE

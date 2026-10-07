@@ -26,6 +26,11 @@ class MurphyTrendStrategy(BaseStrategy):
         super().__init__(name="MURPHY_TREND", config=config)
         self.sl_atr_mult = float(self.config.get("SL_ATR_MULT", 1.5))
         self.tp_atr_mult = float(self.config.get("TP_ATR_MULT", 3.5))
+        # Garde anti-épuisement : pas d'achat en surachat (RSI ≥ RSI_OB) ni de vente en survente.
+        # Constat 22/09→06/10 : signaux « continuation » notés 10/10 avec RSI 74-80 en haut de mouvement.
+        self.exhaustion_guard = bool(self.config.get("MURPHY_EXHAUSTION_GUARD", True))
+        self.rsi_ob = float(self.config.get("RSI_OB", 70))
+        self.rsi_os = float(self.config.get("RSI_OS", 30))
 
     def analyze(
         self,
@@ -90,6 +95,13 @@ class MurphyTrendStrategy(BaseStrategy):
             elif close < ema_21 < ema_55 and rsi <= 50:
                 trigger_short = True  # Continuation de tendance forte
 
+        exhausted = False
+        if self.exhaustion_guard:
+            if trigger_long and rsi >= self.rsi_ob:
+                trigger_long, exhausted = False, True
+            if trigger_short and rsi <= self.rsi_os:
+                trigger_short, exhausted = False, True
+
         score = 0.0
         if trigger_long:
             score += 4.0
@@ -143,7 +155,8 @@ class MurphyTrendStrategy(BaseStrategy):
             sl_price=sl_price,
             tp_price=tp_price,
             rr_ratio=rr_ratio,
-            reason=f"Murphy Trend Following (Alignment={bullish_alignment or bearish_alignment}, ADX={adx:.1f})",
+            reason=(f"Murphy Trend Following (Alignment={bullish_alignment or bearish_alignment}, ADX={adx:.1f})"
+                    + (f" — entrée refusée : RSI {rsi:.1f} en zone d'épuisement" if exhausted else "")),
             extra_data={
                 "donchian_upper_20": donch_u,
                 "donchian_lower_20": donch_l,

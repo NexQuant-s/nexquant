@@ -99,12 +99,19 @@ class TestStrategies:
 
         df_ind = calc.calculate_all_indicators(df)
         regime = RegimeResult(regime="trending_bull", confidence=0.85)
-        strat = MurphyTrendStrategy(base_config)
+        # Série strictement haussière (RSI ≈ 100) : on teste ici le déclenchement, garde désactivée
+        strat = MurphyTrendStrategy({**base_config, "MURPHY_EXHAUSTION_GUARD": False})
         res = strat.analyze(df_ind, "XAUUSD", regime, "commodity_gold", current_price=prices[-1])
 
         assert res.strategy_name == "MURPHY_TREND"
         assert res.trigger_long is True
         assert res.rr_ratio > 1.5
+
+        # Avec la garde (défaut) : pas d'achat en surachat
+        guarded = MurphyTrendStrategy(base_config).analyze(df_ind, "XAUUSD", regime, "commodity_gold",
+                                                           current_price=prices[-1])
+        assert guarded.trigger_long is False and guarded.should_long is False
+        assert "épuisement" in guarded.reason
 
     def test_volman_price_action(self, base_config):
         calc = TechnicalIndicators(base_config)
@@ -172,7 +179,8 @@ class TestStrategies:
 
     def test_strategy_engine_adaptive_selection(self, base_config):
         calc = TechnicalIndicators(base_config)
-        engine = StrategyEngine(base_config)
+        # Série synthétique strictement haussière (RSI ≈ 100) : garde Murphy désactivée ici
+        engine = StrategyEngine({**base_config, "MURPHY_EXHAUSTION_GUARD": False})
 
         # Test A: Tendance haussière -> sélectionne une stratégie de tendance
         dates = pd.date_range("2026-01-01", periods=60, freq="1h")

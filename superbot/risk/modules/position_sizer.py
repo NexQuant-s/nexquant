@@ -1,5 +1,4 @@
 import logging
-import pandas as pd
 import numpy as np
 from datetime import datetime, timezone
 import math
@@ -32,6 +31,10 @@ def calculate_position_size(rm, account_balance: float, entry_price: float,
     Returns:
         Tuple de (taille_de_position, détails_du_calcul)
     """
+    if not account_balance or account_balance <= 0:
+        log.warning(f"Solde invalide ({account_balance}) : aucune position calculée pour {symbol}")
+        return 0.0, {'error': 'Invalid account balance'}
+
     try:
         # 1. Récupérer les spécifications du symbole (taille du contrat, tick size, tick value)
         contract_size = 1.0
@@ -122,7 +125,10 @@ def calculate_position_size(rm, account_balance: float, entry_price: float,
         adjusted_risk_pct = risk_pct * sentiment_factor
 
         # S'assurer que le risque ajusté reste dans des limites raisonnables
-        adjusted_risk_pct = max(0.005, min(0.05, adjusted_risk_pct))  # Entre 0.5% et 5%
+        # Plancher relatif au risque configuré (30 % de RISK_PCT, 0,5 % max) : un plancher fixe de 0,5 %
+        # empêchait un RISK_PCT < 0,5 % et neutralisait les réductions (mode défensif ×0,3).
+        risk_floor = min(0.005, float(rm.RISK_PCT) / 100.0 * 0.3)
+        adjusted_risk_pct = max(risk_floor, min(0.05, adjusted_risk_pct))
 
         # 5. Ajuster basé sur la corrélation du portefeuille (si disponible)
         correlation_adjustment = 1.0
@@ -277,16 +283,13 @@ def calculate_position_size(rm, account_balance: float, entry_price: float,
         actual_risk_pct = (actual_risk_amount / account_balance) * 100 if account_balance > 0 else 0
 
         # Si le risque réel dépasse la limite de sécurité
-        max_allowed_risk_pct = min(rm.MAX_DAILY_LOSS_PCT, max(3.0, rm.RISK_PCT * 2.0))
         if getattr(rm, 'ENABLE_LOSS_LIMIT', False):
             max_allowed_risk_pct = min(rm.MAX_DAILY_LOSS_PCT, max(3.0, rm.RISK_PCT * 2.0))
         else:
             max_allowed_risk_pct = max(5.0, rm.RISK_PCT * 3.0)
-        # Adaptation micro-compte (< 200€) : les contrats min (0.01 lot) peuvent représenter 3 à 8% de risque
         # Adaptation micro-compte (< 200€) : les contrats min (0.01 lot) sur matières premières (pétrole, or, gaz)
         # représentent 12 à 25% de risque relatif (~2.50€ au SL sur un compte à 15€, pour un gain de +5€ à +7.50€).
         if account_balance < 200.0 and position_size <= min_size:
-            max_allowed_risk_pct = max(max_allowed_risk_pct, 10.0)
             max_micro_risk = 35.0 if not getattr(rm, 'ENABLE_LOSS_LIMIT', False) else 15.0
             max_allowed_risk_pct = max(max_allowed_risk_pct, max_micro_risk)
 
@@ -329,7 +332,7 @@ def calculate_position_size(rm, account_balance: float, entry_price: float,
         }
 
         # Hard cap based on account balance
-        balance = account_balance or 10000  # fallback
+        balance = account_balance
         if balance < 500:
             max_lot = 0.03
         elif balance < 2000:
@@ -346,14 +349,15 @@ def calculate_position_size(rm, account_balance: float, entry_price: float,
             details['capped_by_hard_limit'] = True
 
         # Garde-fou : vérifier que le risque monétaire du lot minimum ne dépasse pas 1.5% du solde
-        # Cela empêche les trades sur XAGUSD (0.01 lot = 50 oz × $0.30 SL = $15 ≈ 13€) quand le compte est trop petit
-        min_lot_for_symbol = 0.01  # MT5 minimum standard
-        if position_size >= min_lot_for_symbol and price_risk > 0:
-            min_lot_risk_amount = min_lot_for_symbol * price_risk
+        # Cela empêche les trades sur XAGUSD (0.01 lot = 50 oz × $0.30 SL = $15 ≈ 13€) quand le compte est trop petit.
+        # risk_per_unit est déjà en devise de compte par lot (tick_value / tick_size) : l'ancien calcul
+        # (0.01 × écart de prix) ignorait la taille du contrat et ne bloquait jamais rien.
+        if position_size >= min_size and risk_per_unit > 0:
+            min_lot_risk_amount = min_size * risk_per_unit
             max_acceptable_risk = balance * 0.015  # 1.5% du solde
             if min_lot_risk_amount > max_acceptable_risk:
                 log.warning(
-                    f"🛡️ Trade {symbol} rejeté : le lot minimum ({min_lot_for_symbol}) "
+                    f"🛡️ Trade {symbol} rejeté : le lot minimum ({min_size}) "
                     f"risque {min_lot_risk_amount:.2f}€ > 1.5% du solde ({max_acceptable_risk:.2f}€)"
                 )
                 return 0.0, {'error': f'Risque du lot minimum ({min_lot_risk_amount:.2f}€) trop élevé pour le solde ({balance:.0f}€)'}
@@ -446,7 +450,7 @@ def _calculate_kelly_fraction_impl(rm) -> Optional[float]:
                 losses_r.append(pnl / initial_risk)
 
         if not wins_r or not losses_r:
-            log.debug(f"Kelly: pas de données R-Multiples valides pour le calcul")
+            log.debug("Kelly: pas de données R-Multiples valides pour le calcul")
             return None
 
         # Utiliser la médiane des R-Multiples pour réduire l'impact des valeurs aberrantes

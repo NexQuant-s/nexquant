@@ -1,4 +1,3 @@
-import pytest
 from superbot.components.drift_detector import detect_model_drift
 from superbot.components.runtime_config import RuntimeConfig
 from superbot.risk.risk_manager import RiskManager
@@ -48,3 +47,20 @@ def test_bug_watchdog_auto_heals_invalid_risk():
 
     assert res is None
     assert bot.risk_manager.RISK_PCT == 1.0
+
+
+def test_drift_reductions_are_applied_once():
+    # Dérive sévère (0 % de gain) : risque ÷ 2, pas ÷ 8
+    bot = DummyBot(risk_pct=2.0)
+    bot.risk_manager.trade_history = [{'status': 'closed', 'pnl': -1.0} for _ in range(10)]
+    detect_model_drift(bot)
+    assert bot.adaptive_risk_pct == 1.0
+
+    # Dérive modérée (20-30 % de gain) : risque × 0.75, une seule fois
+    bot = DummyBot(risk_pct=2.0)
+    bot.risk_manager.trade_history = (
+        [{'status': 'closed', 'pnl': 1.0} for _ in range(2)]
+        + [{'status': 'closed', 'pnl': -1.0} for _ in range(8)]
+    )
+    detect_model_drift(bot)
+    assert bot.adaptive_risk_pct == 1.5

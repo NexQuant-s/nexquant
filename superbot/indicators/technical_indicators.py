@@ -5,7 +5,6 @@ import pandas as pd
 import numpy as np
 from typing import Dict, Any, Tuple, Optional
 import logging
-from functools import lru_cache
 import hashlib
 import time
 
@@ -52,9 +51,9 @@ class TechnicalIndicators:
 
         sample_df = df.iloc[-sample_size:][cols_to_hash]
 
-        # Créer un hash basé sur les données
-        data_str = sample_df.to_string()
-        return hashlib.md5(data_str.encode()).hexdigest()
+        # Hash des valeurs + index (bien plus rapide que DataFrame.to_string())
+        row_hashes = pd.util.hash_pandas_object(sample_df, index=True).to_numpy()
+        return hashlib.md5(row_hashes.tobytes()).hexdigest()
 
     def _get_from_cache(self, cache_key: str, cache_dict: dict) -> Any:
         """Récupère une valeur du cache si elle existe et est récente."""
@@ -103,7 +102,6 @@ class TechnicalIndicators:
         result = df.copy()
 
         # Extraire les séries une seule fois pour faciliter les calculs
-        open_price = result['open']
         high_price = result['high']
         low_price = result['low']
         close_price = result['close']
@@ -428,10 +426,13 @@ class TechnicalIndicators:
         """
         typical_price = (high + low + close) / 3
         sma_tp = typical_price.rolling(window=period).mean()
-        mean_deviation = typical_price.rolling(window=period).apply(
-            lambda x: np.mean(np.abs(x - np.mean(x))), raw=True
-        )
-        mean_deviation = mean_deviation.replace(0, 1e-10)
+        # Écart absolu moyen par fenêtre, vectorisé (équivalent à rolling().apply(lambda), sans boucle Python)
+        values = typical_price.to_numpy(dtype=float)
+        mad = np.full(len(values), np.nan)
+        if len(values) >= period:
+            windows = np.lib.stride_tricks.sliding_window_view(values, period)
+            mad[period - 1:] = np.abs(windows - windows.mean(axis=1, keepdims=True)).mean(axis=1)
+        mean_deviation = pd.Series(mad, index=typical_price.index).replace(0, 1e-10)
         cci = (typical_price - sma_tp) / (0.015 * mean_deviation)
         return cci
 

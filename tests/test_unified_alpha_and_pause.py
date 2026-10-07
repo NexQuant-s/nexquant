@@ -13,11 +13,9 @@ from datetime import datetime, timezone, timedelta
 from superbot.strategy.unified_alpha import UnifiedAlphaStrategy
 from superbot.brain.performance_learner import PerformanceLearner
 from superbot.brain.report_generator import ReportGenerator
-from superbot.brain.strategy_engine import StrategyEngine
 from superbot.brain.regime_detector import RegimeResult
 from superbot.indicators.technical_indicators import TechnicalIndicators
 from superbot.risk.risk_manager import RiskManager
-from superbot import config
 
 
 @pytest.fixture

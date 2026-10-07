@@ -1,4 +1,3 @@
-import pytest
 import pandas as pd
 from superbot.ml.walk_forward import WalkForwardOptimizer
 from superbot.ml.probabilistic_scorer import ProbabilisticScorer
@@ -20,10 +19,23 @@ def test_walk_forward_optimizer_basic():
     # Exécuter l'optimisation
     best_params = optimizer.optimize(df)
     
-    # Vérifier que les paramètres retournés font partie de la grille
-    assert best_params['SCORE_MIN'] in [5, 6, 7]
-    assert best_params['RSI_OB'] in [65, 70, 75]
-    assert best_params['ADX_TREND'] in [20, 22, 25]
+    # Seuil 6 : 20 trades gagnants (PF infini) ; seuil 5 : PF 6 ; seuil 7 : < 20 trades
+    assert best_params == {'SCORE_MIN': 6}
+
+
+def test_walk_forward_ignores_unverified_trades():
+    optimizer = WalkForwardOptimizer()
+    trades = [{'signal_score': 9.0, 'pnl': 10.0, 'verified': False}] * 30
+    assert optimizer.optimize(pd.DataFrame(trades)) == {'SCORE_MIN': 6}  # inchangé : rien de vérifié
+
+
+def test_effective_score_min_never_below_config(monkeypatch):
+    from superbot.brain.strategy_engine import StrategyEngine
+    monkeypatch.setattr("superbot.config.SCORE_MIN", 8)
+    assert StrategyEngine.effective_score_min(5) == 8      # walk-forward / adaptation ne baissent pas
+    assert StrategyEngine.effective_score_min(9) == 9      # mais peuvent durcir
+    assert StrategyEngine.effective_score_min(12) == 10    # plafond
+    assert StrategyEngine.effective_score_min(None) == 8
 
 def test_probabilistic_scorer_predict_proba():
     """Vérifie le fonctionnement du Scorer probabiliste en mode entraîné et non-entraîné."""

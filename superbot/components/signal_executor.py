@@ -17,8 +17,72 @@ def _reject_trade(bot, symbol: str, reason: str):
     if getattr(bot, 'report_generator', None):
         try:
             bot.report_generator.record_rejection_event(symbol, reason)
-        except Exception:
-            pass
+        except Exception as _exc:
+            log.debug(f"Erreur ignorée (non bloquante) : {_exc}")
+
+def _strategy_sl_tp(signal_data: dict, entry_price: float):
+    """SL/TP proposés par la stratégie s'ils sont exploitables au prix d'entrée réel, sinon None.
+
+    Activé par USE_STRATEGY_SL_TP : le backtest utilise ces niveaux (SL Donchian de Murphy) ; les
+    remplacer par le SL/TP ATR × régime supprimait l'avantage mesuré (PF ≈ 1,0 au lieu de ≈ 1,5-1,8).
+    """
+    from superbot.config import USE_STRATEGY_SL_TP
+    if not USE_STRATEGY_SL_TP:
+        return None
+    try:
+        sl, tp = float(signal_data.get('sl_price') or 0), float(signal_data.get('tp_price') or 0)
+    except (TypeError, ValueError):
+        return None
+    if sl <= 0 or tp <= 0 or entry_price <= 0:
+        return None
+    if signal_data.get('should_long'):
+        return (sl, tp) if sl < entry_price < tp else None
+    return (sl, tp) if tp < entry_price < sl else None
+
+
+def _risk_factor(bot) -> float:
+    """
+    Facteur appliqué au risque par trade : sentiment/news × protection intra-journée
+    (PerformanceLearner : ×0.3 en mode défensif, ×0.5 après +150 % de l'objectif).
+    NB : position_sizer garde un plancher de 0.5 % de risque.
+    """
+    factor = 1.0
+    if getattr(bot, 'news_manager', None):
+        factor *= bot.news_manager.get_risk_factor()
+    learner = getattr(bot, 'performance_learner', None)
+    if learner is not None and hasattr(learner, 'get_risk_multiplier'):
+        mult = learner.get_risk_multiplier()
+        if mult < 1.0:
+            log.info(f"🛡️ [PerformanceLearner] Risque réduit ×{mult} (protection intra-journée active)")
+        factor *= mult
+    return factor
+
+
+def is_exhausted_entry(side: str, rsi: float, bb_pos: float, rsi_ob: float = 70.0,
+                       rsi_os: float = 30.0, bb_extreme: float = 0.95) -> bool:
+    """Achat en surachat (RSI ≥ OB ou prix au-dessus de 95 % des Bollinger) ou vente en survente."""
+    if side == "LONG":
+        return rsi >= rsi_ob or bb_pos > bb_extreme
+    if side == "SHORT":
+        return rsi <= rsi_os or bb_pos < 1.0 - bb_extreme
+    return False
+
+
+def _exhaustion_reason(signal_data: dict, df_with_indicators) -> str:
+    """Motif de rejet si l'entrée se fait en zone d'épuisement (filtre ENTRY_EXHAUSTION_FILTER), sinon ''."""
+    from superbot import config as _cfg
+    if not _cfg.ENTRY_EXHAUSTION_FILTER or df_with_indicators is None or len(df_with_indicators) == 0:
+        return ""
+    side = "LONG" if signal_data.get('should_long') else ("SHORT" if signal_data.get('should_short') else "")
+    last = df_with_indicators.iloc[-1]
+    rsi = float(last.get('rsi', 50.0) or 50.0)
+    close = float(last.get('close', 0.0) or 0.0)
+    upper, lower = float(last.get('bb_upper', 0.0) or 0.0), float(last.get('bb_lower', 0.0) or 0.0)
+    bb_pos = (close - lower) / (upper - lower) if upper > lower else 0.5
+    if is_exhausted_entry(side, rsi, bb_pos, _cfg.RSI_OB, _cfg.RSI_OS, _cfg.ENTRY_BB_EXTREME):
+        return f"Entrée {side} en zone d'épuisement (RSI={rsi:.1f}, position Bollinger={bb_pos:.2f})"
+    return ""
+
 
 def execute_signal_trade(bot, symbol: str, signal_data: dict, df_with_indicators):
     """
@@ -141,7 +205,9 @@ def execute_signal_trade(bot, symbol: str, signal_data: dict, df_with_indicators
                         last_ts = last_ts.replace(tzinfo=timezone.utc)
                     now_utc = datetime.now(timezone.utc)
                     if (now_utc - last_ts).total_seconds() < 2700: # 45 minutes
-                        last_side = str(last_trade.get('side', '')).upper()
+                        # Le journal stocke 'buy'/'sell' ; le signal raisonne en LONG/SHORT.
+                        last_side = {'BUY': 'LONG', 'SELL': 'SHORT'}.get(
+                            str(last_trade.get('side', '')).upper(), str(last_trade.get('side', '')).upper())
                         cand_side = "LONG" if signal_data.get('should_long') else ("SHORT" if signal_data.get('should_short') else "")
                         if last_side and cand_side and last_side != cand_side:
                             log.info(f"🚫 [Anti-Whipsaw] Trade {symbol} rejeté : Perte récente (<45m) et signal opposé ({cand_side} vs {last_side}).")
@@ -149,6 +215,12 @@ def execute_signal_trade(bot, symbol: str, signal_data: dict, df_with_indicators
                             return
                 except Exception as e:
                     log.debug(f"Erreur parsing timestamp Anti-Whipsaw: {e}")
+
+    # 0d. Filtre d'épuisement : ne pas acheter en surachat ni vendre en survente
+    exhaustion_reason = _exhaustion_reason(signal_data, df_with_indicators)
+    if exhaustion_reason:
+        _reject_trade(bot, symbol, exhaustion_reason)
+        return
 
     # 1. Vérifier les filtres de nouvelles et de sentiment
     if getattr(bot, 'news_manager', None):
@@ -239,11 +311,15 @@ def execute_signal_trade(bot, symbol: str, signal_data: dict, df_with_indicators
 
         # D. Obstacle pivot
         atr_value = df_with_indicators.iloc[-1].get('atr', 0)
-        sl_price, _ = bot.risk_manager.calculate_sl_tp_levels(
-            entry_price, atr_value,
-            "LONG" if signal_data.get('should_long') else "SHORT",
-            asset_type=symbol_asset_class, symbol=symbol
-        )
+        strat_levels = _strategy_sl_tp(signal_data, entry_price)
+        if strat_levels:
+            sl_price = strat_levels[0]
+        else:
+            sl_price, _ = bot.risk_manager.calculate_sl_tp_levels(
+                entry_price, atr_value,
+                "LONG" if signal_data.get('should_long') else "SHORT",
+                asset_type=symbol_asset_class, symbol=symbol
+            )
         if not check_pivot_obstacle(entry_price, sl_price, df_with_indicators, signal_data.get('should_long', False), symbol):
             return
 
@@ -281,7 +357,12 @@ def execute_signal_trade(bot, symbol: str, signal_data: dict, df_with_indicators
 
     # 3. Déterminer le stop loss et take profit via le Risk Manager
     atr_value = float(df_with_indicators.iloc[-1].get('atr', 0))
-    if atr_value > 0 and bot.risk_manager:
+    strat_levels = _strategy_sl_tp(signal_data, entry_price)
+    if strat_levels:
+        sl_price, tp_price = strat_levels
+        log.info(f"[SL/TP] {symbol} : niveaux de la stratégie {signal_data.get('strategy_used', '')} "
+                 f"(SL {sl_price:.5f} / TP {tp_price:.5f})")
+    elif atr_value > 0 and bot.risk_manager:
         position_side = "LONG" if signal_data['should_long'] else "SHORT"
         # Passer le régime HMM pour les multiplicateurs adaptatifs.
         hmm_label = signal_data.get('hmm_label', signal_data.get('market_regime', ''))
@@ -390,9 +471,13 @@ def execute_signal_trade(bot, symbol: str, signal_data: dict, df_with_indicators
                 signal_data['details'] = {}
             signal_data['details']['win_prob'] = win_prob
 
+            from superbot import config as _cfg
             scorer = getattr(bot.online_learner, 'scorer', None)
             is_high_conviction_consensus = score_raw_val >= (score_min_val + 1.5)
-            if scorer and getattr(scorer, 'is_trained', False):
+            if _cfg.ML_SHADOW_MODE:
+                # Mode ombre : prédiction journalisée pour calibration, sans effet sur le trade.
+                log.info(f"🤖 [ML-ombre] {symbol} : prob. de gain prédite {win_prob:.1%} (sans effet)")
+            elif scorer and getattr(scorer, 'is_trained', False):
                 if win_prob < 0.15:
                     log.warning(f"🤖 [OnlineLearner] Trade {symbol} VETO ABSOLU : prob ML trop faible ({win_prob:.1%})")
                     return
@@ -424,7 +509,6 @@ def execute_signal_trade(bot, symbol: str, signal_data: dict, df_with_indicators
     if conviction_boost > 1.0 and position_size > 0:
         size_before_boost = position_size
         boosted_size = position_size * conviction_boost
-        # Le boost est re-cappé par MAX_POSITION_SIZE (et par la marge dans position_sizer).
         # Le boost est re-cappé par MAX_POSITION_SIZE et par la marge max disponible.
         boosted_size = min(boosted_size, bot.risk_manager.MAX_POSITION_SIZE)
         max_margin_size = size_details.get('max_size_by_margin') if isinstance(size_details, dict) else None
@@ -432,8 +516,7 @@ def execute_signal_trade(bot, symbol: str, signal_data: dict, df_with_indicators
             boosted_size = min(boosted_size, max_margin_size)
         log.info(
             f"[ConvictionBoost] Taille {symbol} demandée : {size_before_boost:.6f} × {conviction_boost:.2f} = "
-            f"{boosted_size:.6f} (cappé à MAX_POSITION_SIZE={bot.risk_manager.MAX_POSITION_SIZE})"
-            f"{boosted_size:.6f} (cappé par MAX_POSITION_SIZE et marge disponible)"
+            f"{boosted_size:.6f} (cappé par MAX_POSITION_SIZE={bot.risk_manager.MAX_POSITION_SIZE} et marge disponible)"
         )
         position_size = boosted_size
 
@@ -499,7 +582,10 @@ def execute_signal_trade(bot, symbol: str, signal_data: dict, df_with_indicators
             # Score et probabilité prédite à l'entrée : nécessaires pour
             # calibrer le win rate contre les issues réalisées.
             'signal_score': float(signal_data.get('total_score', 0)),
-            'win_prob': float(signal_data.get('details', {}).get('win_prob', 0.0))
+            'win_prob': float(signal_data.get('details', {}).get('win_prob', 0.0)),
+            # Moment de l'entrée (sinon le ML apprendrait l'heure de clôture)
+            'hour_of_day': float(datetime.now(timezone.utc).hour),
+            'day_of_week': float(datetime.now(timezone.utc).weekday()),
         }
 
         # Stratégie ayant généré le signal
