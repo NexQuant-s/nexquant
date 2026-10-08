@@ -15,6 +15,13 @@ $settings = New-ScheduledTaskSettingsSet -RestartCount 5 -RestartInterval (New-T
 Register-ScheduledTask -TaskName 'NexQuant SuperBot' -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null
 Write-Host "Tâche planifiée 'NexQuant SuperBot' installée (lancement à l'ouverture de session)."
 
+# Contrôleur Telegram (pilotage depuis le téléphone) : processus séparé, sans fenêtre, toujours actif
+$Root = Split-Path -Parent $Scripts
+$Pythonw = Join-Path (Split-Path (Get-Command python).Source) 'pythonw.exe'
+$tgAction = New-ScheduledTaskAction -Execute $Pythonw -Argument '-m superbot.telegram_controller' -WorkingDirectory $Root
+Register-ScheduledTask -TaskName 'NexQuant Telegram' -Action $tgAction -Trigger $trigger -Settings $settings -Force | Out-Null
+Write-Host "Tâche planifiée 'NexQuant Telegram' installée (nécessite TELEGRAM_BOT_TOKEN et TELEGRAM_CHAT_ID dans le .env)."
+
 $Desktop = [Environment]::GetFolderPath('Desktop')
 $shell = New-Object -ComObject WScript.Shell
 foreach ($item in @(@('Démarrer NexQuant', $Start), @('Arrêter NexQuant', $Stop))) {

@@ -338,6 +338,13 @@ def run_main_loop(bot):
                     log.debug(f"Erreur vérification ProfitCircuitBreaker : {e}")
             # ─────────────────────────────────────────────────────────────────
 
+            # Pause / reprise demandée à distance (contrôleur Telegram, fichier remote_control.json)
+            try:
+                from superbot.remote_control import apply_remote_pause
+                apply_remote_pause(bot)
+            except Exception as _rc_err:
+                log.warning(f"Lecture du contrôle à distance impossible : {_rc_err}")
+
             if bot.is_paused:
                 bot._last_cycle_heartbeat = time.time()
                 if getattr(bot, 'auto_unpause', False):
@@ -357,7 +364,7 @@ def run_main_loop(bot):
                     else:
                         log.info(f"😴 Bot en pause. Auto-unpause prévu dans {max(0, int(delay - elapsed_pause))}s...")
                 else:
-                    log.info("😴 Bot en pause. En attente du signal de démarrage depuis la plateforme web...")
+                    log.info("😴 Bot en pause (aucun nouvel ordre). Reprise : /reprendre sur Telegram.")
                 cycle_duration = time.time() - cycle_start
                 if cycle_duration < target_cycle_time:
                     sleep_time = target_cycle_time - cycle_duration

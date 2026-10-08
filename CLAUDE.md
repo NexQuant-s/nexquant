@@ -102,7 +102,9 @@ Clôtures : `components/position_syncer.py`. Autres : `brain/session_manager.py`
   (`lambda req=request: mt5.order_send(req)`). La librairie C refuse `f(*args, **kwargs)` même vide
   (« Unnamed arguments not allowed ») — régression du 07/10/2026 qui bloquait tous les ordres.
 - Lancement : `scripts/start_bot.ps1`, `scripts/stop_bot.ps1`, `scripts/install_autostart.ps1` ; une seule
-  instance possible (verrou `superbot_mt5.lock`). Pilotage téléphone : voir `docs/LANCEMENT_PC_TELEPHONE.md`.
+  instance possible (verrou `superbot_mt5.lock`). Pilotage téléphone : contrôleur Telegram `python -m superbot.telegram_controller` (processus séparé, allowlist
+  `TELEGRAM_CHAT_ID`, pause via `superbot/remote_control.py` → `LOG_DIR/remote_control.json` lu à chaque cycle).
+  Voir `docs/LANCEMENT_PC_TELEPHONE.md`.
 - L'application web (télémétrie `NEXQUANT_*`) est abandonnée : variables commentées dans le .env.
 - `DASHBOARD_HOST` (défaut `0.0.0.0`) ; `127.0.0.1` pour un accès local uniquement (pas d'authentification).
 - Garde-fou : un compte `MT5_REAL` exige `ALLOW_LIVE_TRADING=true`.

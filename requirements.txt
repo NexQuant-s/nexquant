@@ -26,3 +26,4 @@ feedparser>=6.0.0         # Scraping des flux RSS financiers (Reuters, Yahoo, et
 
 pytest
 pytest-mock
+psutil>=5.9
