@@ -96,6 +96,14 @@ Clôtures : `components/position_syncer.py`. Autres : `brain/session_manager.py`
   `StrategyEngine._build_strategies`), `USE_STRATEGY_SL_TP` (`signal_executor._strategy_sl_tp`),
   `SIGNAL_ON_CLOSED_BAR` (orchestrateur : bougie en formation exclue, une évaluation par bougie).
   Le plancher de risque de `position_sizer` vaut min(0,5 %, 0,3 × RISK_PCT).
+- `MIN_LOT_MAX_RISK_PCT` (défaut 1,5 ; 2,0 dans le .env) : risque max accepté quand le lot minimum dépasse
+  le risque cible (l'or avec le SL Donchian large était sinon toujours refusé).
+- ⚠️ MT5 : toujours appeler les fonctions à argument via lambda dans `_call_api`
+  (`lambda req=request: mt5.order_send(req)`). La librairie C refuse `f(*args, **kwargs)` même vide
+  (« Unnamed arguments not allowed ») — régression du 07/10/2026 qui bloquait tous les ordres.
+- Lancement : `scripts/start_bot.ps1`, `scripts/stop_bot.ps1`, `scripts/install_autostart.ps1` ; une seule
+  instance possible (verrou `superbot_mt5.lock`). Pilotage téléphone : voir `docs/LANCEMENT_PC_TELEPHONE.md`.
+- L'application web (télémétrie `NEXQUANT_*`) est abandonnée : variables commentées dans le .env.
 - `DASHBOARD_HOST` (défaut `0.0.0.0`) ; `127.0.0.1` pour un accès local uniquement (pas d'authentification).
 - Garde-fou : un compte `MT5_REAL` exige `ALLOW_LIVE_TRADING=true`.
 
