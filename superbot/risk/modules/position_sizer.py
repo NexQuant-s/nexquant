@@ -353,12 +353,13 @@ def calculate_position_size(rm, account_balance: float, entry_price: float,
         # risk_per_unit est déjà en devise de compte par lot (tick_value / tick_size) : l'ancien calcul
         # (0.01 × écart de prix) ignorait la taille du contrat et ne bloquait jamais rien.
         if position_size >= min_size and risk_per_unit > 0:
+            from superbot.config import MIN_LOT_MAX_RISK_PCT
             min_lot_risk_amount = min_size * risk_per_unit
-            max_acceptable_risk = balance * 0.015  # 1.5% du solde
+            max_acceptable_risk = balance * MIN_LOT_MAX_RISK_PCT / 100.0
             if min_lot_risk_amount > max_acceptable_risk:
                 log.warning(
                     f"🛡️ Trade {symbol} rejeté : le lot minimum ({min_size}) "
-                    f"risque {min_lot_risk_amount:.2f}€ > 1.5% du solde ({max_acceptable_risk:.2f}€)"
+                    f"risque {min_lot_risk_amount:.2f}€ > {MIN_LOT_MAX_RISK_PCT}% du solde ({max_acceptable_risk:.2f}€)"
                 )
                 return 0.0, {'error': f'Risque du lot minimum ({min_lot_risk_amount:.2f}€) trop élevé pour le solde ({balance:.0f}€)'}
 

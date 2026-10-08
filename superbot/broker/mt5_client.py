@@ -144,6 +144,8 @@ class MT5Client(Broker):
     def _call_api(self, api_func, default_val, *args, idempotent=True, **kwargs):
         """
         Wrapper unifié pour les appels MT5 avec retry et reconnexion automatique.
+        ⚠️ Passer une lambda pour les fonctions MT5 à argument (order_send…) : la librairie C refuse
+        un appel de la forme f(*args, **kwargs) même vide (« Unnamed arguments not allowed »).
         Thread-safe : sérialise les appels au terminal MT5 via _api_lock.
         """
         with self._api_lock:
@@ -669,7 +671,7 @@ class MT5Client(Broker):
         }
 
         log.info(f"Envoi ordre MT5 : {side_upper} {amount_lots} {symbol} @ {price:.5f} (SL: {sl:.5f}, TP: {tp:.5f})")
-        result = self._call_api(mt5.order_send, None, request, idempotent=False)
+        result = self._call_api(lambda req=request: mt5.order_send(req), None, idempotent=False)
 
         # Retry avec mode de remplissage alternatif si rejeté pour fill type
         if result is not None and getattr(result, "retcode", 0) == 10030:  # TRADE_RETCODE_INVALID_FILL
@@ -678,7 +680,7 @@ class MT5Client(Broker):
             for alt in alt_modes:
                 if alt != fill_mode:
                     request["type_filling"] = alt
-                    result = self._call_api(mt5.order_send, None, request, idempotent=False)
+                    result = self._call_api(lambda req=request: mt5.order_send(req), None, idempotent=False)
                     if result and result.retcode == mt5.TRADE_RETCODE_DONE:
                         break
 
@@ -748,7 +750,7 @@ class MT5Client(Broker):
                 "sl": float(pos_sl) if pos_sl > 0 else 0.0,
                 "tp": float(pos_tp) if pos_tp > 0 else 0.0,
             }
-            result = self._call_api(mt5.order_send, None, request, idempotent=False)
+            result = self._call_api(lambda req=request: mt5.order_send(req), None, idempotent=False)
             if result is None or result.retcode != mt5.TRADE_RETCODE_DONE:
                 err_code = mt5.last_error()
                 log.error(f"Échec modification SL/TP #{ticket} ({symbol}): {result.comment if result else ''} (code: {err_code})")
@@ -800,7 +802,7 @@ class MT5Client(Broker):
             }
 
             log.info(f"Fermeture position MT5 #{ticket} sur {symbol} ({volume} lots {side})...")
-            result = self._call_api(mt5.order_send, None, request, idempotent=False)
+            result = self._call_api(lambda req=request: mt5.order_send(req), None, idempotent=False)
 
             if result is not None and getattr(result, "retcode", 0) == 10030:
                 log.warning(f"Rejet filling mode {fill_mode} sur {symbol} pour fermeture. Tentative alternative...")
@@ -808,7 +810,7 @@ class MT5Client(Broker):
                 for alt in alt_modes:
                     if alt != fill_mode:
                         request["type_filling"] = alt
-                        result = self._call_api(mt5.order_send, None, request, idempotent=False)
+                        result = self._call_api(lambda req=request: mt5.order_send(req), None, idempotent=False)
                         if result and result.retcode == mt5.TRADE_RETCODE_DONE:
                             break
 
@@ -854,7 +856,7 @@ class MT5Client(Broker):
                         "action": mt5.TRADE_ACTION_REMOVE,
                         "order": o.ticket,
                     }
-                    self._call_api(mt5.order_send, None, request)
+                    self._call_api(lambda req=request: mt5.order_send(req), None)
             return True
         except Exception as e:
             log.warning(f"Erreur annulation ordres MT5: {e}")

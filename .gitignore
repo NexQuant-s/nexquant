@@ -1,6 +1,6 @@
 # Fichiers d'environnement (API keys, secrets)
 .env
-.env.backup
+.env.backup*
 .env.local
 .env.*.local
 
