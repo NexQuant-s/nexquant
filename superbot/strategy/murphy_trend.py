@@ -34,6 +34,10 @@ class MurphyTrendStrategy(BaseStrategy):
         # ADX minimum pour déclencher. Étude H1 broker 3 ans : 25 → PF 1,70/1,94 (train/test), gain total
         # conservé et moins de mois perdants (contre 1,58/1,86 à 20).
         self.min_adx = float(self.config.get("MURPHY_MIN_ADX", 20))
+        # Distance minimale RÉELLE du stop (× ATR). 0 = comportement historique : le stop pouvait se retrouver
+        # presque sur le prix d'entrée (canal de Donchian étroit) alors que l'objectif était calculé sur 0,5 ATR
+        # → gains « +20 R » irréalisables (spread, stop minimum du broker) qui gonflaient le PF du backtest.
+        self.min_sl_atr = float(self.config.get("MURPHY_MIN_SL_ATR", 0.0))
 
     def analyze(
         self,
@@ -135,12 +139,16 @@ class MurphyTrendStrategy(BaseStrategy):
 
         if trigger_long:
             sl_price = max(donch_m, close - (self.sl_atr_mult * atr)) if donch_m > 0 and donch_m < close else (close - self.sl_atr_mult * atr)
+            if self.min_sl_atr > 0:
+                sl_price = min(sl_price, close - self.min_sl_atr * atr)
             stop_dist = max(close - sl_price, atr * 0.5, 1e-5)
             tp_price = close + (stop_dist * (self.tp_atr_mult / self.sl_atr_mult))
             rr_ratio = (tp_price - close) / stop_dist
 
         elif trigger_short:
             sl_price = min(donch_m, close + (self.sl_atr_mult * atr)) if donch_m > 0 and donch_m > close else (close + self.sl_atr_mult * atr)
+            if self.min_sl_atr > 0:
+                sl_price = max(sl_price, close + self.min_sl_atr * atr)
             stop_dist = max(sl_price - close, atr * 0.5, 1e-5)
             tp_price = close - (stop_dist * (self.tp_atr_mult / self.sl_atr_mult))
             rr_ratio = (close - tp_price) / stop_dist

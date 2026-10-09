@@ -57,3 +57,23 @@ def test_closed_bar_age_blocks_stale_signal_after_restart():
     assert closed_bar_age_seconds(df, "1h", now="2026-10-08 18:00:09+00:00") == 9
     assert closed_bar_age_seconds(df, "1h", now="2026-10-08 18:54:41+00:00") > 10 * 60
     assert closed_bar_age_seconds(df, "15m", now="2026-10-08 17:16:00+00:00") == 60  # 15 min : ouverte 17:00, close 17:15
+
+
+def test_murphy_min_sl_atr_enforces_real_stop_distance():
+    import pandas as pd
+    from superbot.brain.regime_detector import RegimeResult
+    from superbot.strategy.murphy_trend import MurphyTrendStrategy
+
+    n = 40
+    close = [100 + i * 0.1 for i in range(n)]
+    df = pd.DataFrame({"open": close, "high": [c + 0.05 for c in close], "low": [c - 0.05 for c in close],
+                       "close": close, "ema_fast": [c - 0.2 for c in close], "ema_slow": [c - 0.5 for c in close],
+                       "ema_trend": [c - 1.0 for c in close], "adx": 30.0, "rsi": 60.0, "atr": 0.3,
+                       "donchian_upper_20": [c - 0.5 for c in close], "donchian_lower_20": [c - 3 for c in close],
+                       "donchian_middle_20": [c - 0.02 for c in close]})  # milieu du canal collé au prix → stop quasi nul
+    args = (df, "EURUSD", RegimeResult(regime="trending_bull", confidence=0.8), "forex_major", close[-1])
+    legacy = MurphyTrendStrategy({}).analyze(*args)
+    fixed = MurphyTrendStrategy({"MURPHY_MIN_SL_ATR": 2.0}).analyze(*args)
+    assert legacy.trigger_long and fixed.trigger_long
+    assert legacy.entry_price - legacy.sl_price < 0.5 * 0.3             # historique : stop < 0,5 ATR (0,4 ATR ici)
+    assert abs((fixed.entry_price - fixed.sl_price) - 2.0 * 0.3) < 1e-9  # corrigé : stop réel = 2 ATR

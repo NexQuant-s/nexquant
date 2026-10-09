@@ -96,6 +96,12 @@ Clôtures : `components/position_syncer.py`. Autres : `brain/session_manager.py`
   `StrategyEngine._build_strategies`), `USE_STRATEGY_SL_TP` (`signal_executor._strategy_sl_tp`),
   `SIGNAL_ON_CLOSED_BAR` (orchestrateur : bougie en formation exclue, une évaluation par bougie).
   Le plancher de risque de `position_sizer` vaut min(0,5 %, 0,3 × RISK_PCT).
+- ⚠️ **Correction du 09/10/2026** : les PF de backtest annoncés plus haut (1,5-1,9) étaient gonflés par des stops quasi
+  nuls de Murphy (canal de Donchian étroit → SL sur le prix d'entrée, TP à 1 ATR : gains « +20 R » irréalisables ; 1,8 % des
+  trades = 51 % du gain brut). Avec `MURPHY_MIN_SL_ATR=2.0` (stop réel ≥ 2 ATR) le PF réel est ≈ 1,14 / 1,17
+  (apprentissage / test), stable avec ou sans plafonnement des R. Espérance ≈ 0,07 R/trade ≈ 0,1 %/jour à 0,5 % de risque :
+  aucun objectif quotidien fixe n'est atteignable sans augmenter le risque. Ne pas passer en réel sur ces chiffres.
+- `CONVICTION_BOOST_ENABLED=false` et `SIGNAL_MAX_BAR_AGE_MIN=10` (parité live/backtest, 09/10/2026).
 - `MIN_LOT_MAX_RISK_PCT` (défaut 1,5 ; 2,0 dans le .env) : risque max accepté quand le lot minimum dépasse
   le risque cible (l'or avec le SL Donchian large était sinon toujours refusé).
 - ⚠️ MT5 : toujours appeler les fonctions à argument via lambda dans `_call_api`
