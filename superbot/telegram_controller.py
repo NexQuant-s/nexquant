@@ -180,6 +180,8 @@ class TelegramController:
         return "▶️ Trading réactivé." + ("" if bot_processes() else " (le bot est arrêté : /demarrer pour le lancer)")
 
     def cmd_start(self):
+        from superbot.remote_control import set_user_stop
+        set_user_stop(False)
         if bot_processes():
             return "Le bot tourne déjà."
         start_bot()
@@ -202,9 +204,12 @@ class TelegramController:
             return "Aucun arrêt en attente (envoyez d'abord /arreter)."
         self.pending_stop_at = 0.0
         self.expected_stop = True
+        from superbot.remote_control import set_user_stop
+        set_user_stop(True)  # le relais de 5 min ne doit pas relancer un arrêt voulu
         n = stop_bot()
         self.was_running = False
-        return f"🔴 Bot arrêté ({n} processus). Les positions ouvertes gardent leurs SL/TP chez le broker."
+        return (f"🔴 Bot arrêté ({n} processus) et relance automatique suspendue. Les positions ouvertes gardent leurs SL/TP "
+                "chez le broker. /demarrer pour relancer.")
 
     # ── Surveillance et alertes ──────────────────────────────────────────────
     def check_alerts(self):

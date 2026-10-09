@@ -105,3 +105,19 @@ def test_poll_once_dispatches_updates_and_advances_offset(monkeypatch):
     c.poll_once()
     assert c.offset == 8 and read_remote_pause() is True
     write_remote_pause(False)
+
+
+def test_stop_sets_user_flag_and_start_clears_it(ctl, monkeypatch):
+    """Régression : le relais de 5 min relançait le bot arrêté volontairement depuis Telegram."""
+    from superbot.remote_control import set_user_stop, user_stop_requested
+    set_user_stop(False)
+    monkeypatch.setattr(tc, "bot_processes", lambda: [object()])
+    monkeypatch.setattr(tc, "stop_bot", lambda: 1)
+    ctl.handle(_msg(42, "/arreter"))
+    assert user_stop_requested() is False                      # simple demande : rien n'est encore arrêté
+    ctl.handle(_msg(42, "/confirmer_arret"))
+    assert user_stop_requested() is True and "relance automatique suspendue" in ctl.http.sent[-1][1]
+    monkeypatch.setattr(tc, "bot_processes", lambda: [])
+    monkeypatch.setattr(tc, "start_bot", lambda: None)
+    ctl.handle(_msg(42, "/demarrer"))
+    assert user_stop_requested() is False

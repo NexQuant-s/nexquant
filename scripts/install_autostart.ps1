@@ -8,7 +8,7 @@ $Pwsh  = (Get-Command pwsh -ErrorAction SilentlyContinue).Source
 if (-not $Pwsh) { $Pwsh = (Get-Command powershell).Source }
 
 # MT5 a besoin de la session utilisateur : déclenchement à l'ouverture de session (pas au démarrage machine)
-$action   = New-ScheduledTaskAction -Execute $Pwsh -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Start`""
+$action   = New-ScheduledTaskAction -Execute $Pwsh -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Start`" -Watchdog"
 $trigger  = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 # Relais toutes les 5 min : relance le bot s'il est tombé (start_bot.ps1 est idempotent, le verrou empêche tout doublon)
 $watchdog = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 5) -RepetitionDuration (New-TimeSpan -Days 3650)
