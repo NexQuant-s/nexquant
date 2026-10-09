@@ -95,10 +95,10 @@ class TelegramController:
         self.journal_pos = None
 
     # ── API Telegram ─────────────────────────────────────────────────────────
-    def _call(self, method: str, timeout: float = 15, **params):
+    def _call(self, method: str, http_timeout: float = 15, **params):
         url = f"https://api.telegram.org/bot{self.token}/{method}"
         try:
-            r = self.http.post(url, json=params, timeout=timeout)
+            r = self.http.post(url, json=params, timeout=http_timeout)
             data = r.json()
             return data.get("result") if data.get("ok") else None
         except Exception as exc:  # jamais le message brut : il contient l'URL, donc le jeton
@@ -114,7 +114,7 @@ class TelegramController:
         params = {"timeout": 25, "allowed_updates": ["message"]}
         if self.offset is not None:
             params["offset"] = self.offset
-        updates = self._call("getUpdates", timeout=35, **params) or []
+        updates = self._call("getUpdates", http_timeout=35, **params) or []
         for upd in updates:
             self.offset = upd["update_id"] + 1
             self.handle(upd)

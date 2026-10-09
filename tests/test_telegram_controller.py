@@ -86,3 +86,22 @@ def test_apply_remote_pause_does_not_override_other_pauses():
     write_remote_pause(False)
     apply_remote_pause(bot)
     assert bot.is_paused is False and bot._remote_paused is False
+
+
+def test_poll_once_dispatches_updates_and_advances_offset(monkeypatch):
+    """Régression : getUpdates recevait deux fois « timeout » (TypeError) et le contrôleur bouclait en erreur."""
+    monkeypatch.setattr(tc, "bot_processes", lambda: [])
+    monkeypatch.setattr(tc, "dashboard_data", lambda: None)
+    write_remote_pause(False)
+
+    class Http(FakeHttp):
+        def post(self, url, json=None, timeout=None):
+            if url.endswith("/getUpdates"):
+                assert json["timeout"] == 25 and timeout == 35  # attente longue Telegram / délai HTTP
+                return SimpleNamespace(json=lambda: {"ok": True, "result": [_msg(42, "/pause") | {"update_id": 7}]})
+            return super().post(url, json=json, timeout=timeout)
+
+    c = tc.TelegramController("TOKEN", "42", http=Http())
+    c.poll_once()
+    assert c.offset == 8 and read_remote_pause() is True
+    write_remote_pause(False)
