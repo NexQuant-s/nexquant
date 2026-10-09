@@ -28,6 +28,14 @@ Register-ScheduledTask -TaskName 'NexQuant Telegram' -Action $tgAction -Trigger 
 Write-Host "Tâche planifiée 'NexQuant Telegram' installée."
 } else { Write-Host "Contrôleur Telegram non installé : renseignez TELEGRAM_BOT_TOKEN dans le .env puis relancez ce script." }
 
+# Gestionnaire swing D1 (indices + ETH) : un passage par heure, idempotent, indépendant du bot H1
+$swAction   = New-ScheduledTaskAction -Execute $Pythonw -Argument '-m superbot.swing_runner' -WorkingDirectory $Root
+$swTrigger  = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(2) -RepetitionInterval (New-TimeSpan -Hours 1) -RepetitionDuration (New-TimeSpan -Days 3650)
+$swSettings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+              -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
+Register-ScheduledTask -TaskName 'NexQuant Swing' -Action $swAction -Trigger $swTrigger -Settings $swSettings -Force | Out-Null
+Write-Host "Tâche planifiée 'NexQuant Swing' installée (un passage par heure ; actif si SWING_ENABLED=true dans le .env)."
+
 $Desktop = [Environment]::GetFolderPath('Desktop')
 $shell = New-Object -ComObject WScript.Shell
 foreach ($item in @(@('Démarrer NexQuant', $Start), @('Arrêter NexQuant', $Stop))) {

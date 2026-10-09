@@ -102,6 +102,12 @@ Clôtures : `components/position_syncer.py`. Autres : `brain/session_manager.py`
   (apprentissage / test), stable avec ou sans plafonnement des R. Espérance ≈ 0,07 R/trade ≈ 0,1 %/jour à 0,5 % de risque :
   aucun objectif quotidien fixe n'est atteignable sans augmenter le risque. Ne pas passer en réel sur ces chiffres.
 - `CONVICTION_BOOST_ENABLED=false` et `SIGNAL_MAX_BAR_AGE_MIN=10` (parité live/backtest, 09/10/2026).
+- **Gestionnaire swing D1** (`superbot/swing_runner.py`, stratégie `strategy/trend_pullback_d1.py`) : pullback de tendance sur
+  8 indices + ETHUSD, en parallèle du bot H1 (magic 20201, le bot H1 ne synchronise que ses instruments). Tâche planifiée
+  « NexQuant Swing » (1 passage/heure, idempotent, état `LOG_DIR/swing_state.json`, journal `swing_trades.jsonl`).
+  `SWING_ENABLED/SWING_RISK_PCT/SWING_MAX_POSITIONS/SWING_SYMBOLS` dans le .env. Étude et réserves : `docs/ETUDE_STRATEGIES_2026-10.md`.
+- ⚠️ Ne PAS ré-enregistrer les tâches planifiées (`install_autostart.ps1 -Force`) pendant que le bot tourne : cela tue le bot
+  lancé par la tâche (relancé par le relais de 5 min).
 - `MIN_LOT_MAX_RISK_PCT` (défaut 1,5 ; 2,0 dans le .env) : risque max accepté quand le lot minimum dépasse
   le risque cible (l'or avec le SL Donchian large était sinon toujours refusé).
 - ⚠️ MT5 : toujours appeler les fonctions à argument via lambda dans `_call_api`
