@@ -71,7 +71,7 @@ from superbot.config import (
     KELLY_FRACTION, MIN_TRADES_FOR_KELLY, SL_ATR_MULT, TP_ATR_MULT,
     TRAIL_ATR_MULT, TRAIL_ACTIVATE_ATR_MULT, BE_ATR_MULT, MIN_POSITION_SIZE, MAX_POSITION_SIZE,
     COOLDOWN_SECONDS,
-    BE_DYN_RR, BE_DYN_RR_RATIO, ENABLED_STRATEGIES, SIGNAL_ON_CLOSED_BAR, MURPHY_MIN_ADX,
+    BE_DYN_RR, BE_DYN_RR_RATIO, ENABLED_STRATEGIES, SIGNAL_ON_CLOSED_BAR, MURPHY_MIN_ADX, SIGNAL_MAX_BAR_AGE_MIN,
     # Seuils de drawdown et perte maximale journalière
     MAX_DAILY_LOSS_AMOUNT,
     DRAWDOWN_THRESH_1, DRAWDOWN_THRESH_2, DRAWDOWN_REDUCE_5PCT, DRAWDOWN_REDUCE_10PCT,
@@ -1322,6 +1322,13 @@ class SuperBot:
                 if last_bars.get(symbol) == bar_key:
                     return
                 last_bars[symbol] = bar_key
+                if SIGNAL_MAX_BAR_AGE_MIN > 0:
+                    from superbot.strategy.knowledge_base import closed_bar_age_seconds
+                    age_s = closed_bar_age_seconds(df_with_indicators, GRANULARITY)
+                    if age_s > SIGNAL_MAX_BAR_AGE_MIN * 60:
+                        log.info(f"⏭️ {symbol} : bougie clôturée il y a {age_s / 60:.0f} min (> {SIGNAL_MAX_BAR_AGE_MIN:.0f} min) "
+                                 f"— entrée ignorée (évite de rejouer un ancien signal après un redémarrage).")
+                        return
 
             # 3. Analyser le marché et générer un signal de trading (avec cache de cycle)
             strategy_start = time.time()

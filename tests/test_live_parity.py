@@ -45,3 +45,15 @@ def test_strategy_sl_tp_only_when_enabled_and_coherent(monkeypatch):
     short_sig = {"should_short": True, "sl_price": 1.1050, "tp_price": 1.0900}
     assert _strategy_sl_tp(short_sig, 1.1000) == (1.1050, 1.0900)
     assert _strategy_sl_tp({"should_long": True, "sl_price": 0, "tp_price": 1.2}, 1.1) is None
+
+
+def test_closed_bar_age_blocks_stale_signal_after_restart():
+    import pandas as pd
+    from superbot.strategy.knowledge_base import closed_bar_age_seconds
+
+    idx = pd.date_range("2026-10-08 15:00", periods=3, freq="1h", tz="UTC")  # dernière barre ouverte à 17:00
+    df = pd.DataFrame({"close": [1.0, 1.0, 1.0]}, index=idx)
+    # Barre 17:00-18:00 : à 18:00:09 elle vient de clôturer (9 s) ; à 18:09 un redémarrage la rejouerait (9 min)
+    assert closed_bar_age_seconds(df, "1h", now="2026-10-08 18:00:09+00:00") == 9
+    assert closed_bar_age_seconds(df, "1h", now="2026-10-08 18:54:41+00:00") > 10 * 60
+    assert closed_bar_age_seconds(df, "15m", now="2026-10-08 17:16:00+00:00") == 60  # 15 min : ouverte 17:00, close 17:15

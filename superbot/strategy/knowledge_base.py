@@ -484,6 +484,22 @@ def utc_bar_times(df: pd.DataFrame):
     return df.index
 
 
+_TF_SECONDS = {'m': 60, 'h': 3600, 'd': 86400, 'w': 604800}
+
+
+def closed_bar_age_seconds(df: pd.DataFrame, granularity: str, now=None) -> float:
+    """Secondes écoulées depuis la clôture de la dernière barre de `df` (barre supposée clôturée)."""
+    unit = granularity.strip().lower()[-1]
+    tf_s = int(granularity.strip()[:-1]) * _TF_SECONDS[unit]
+    opened = pd.Timestamp(utc_bar_times(df)[-1])
+    if opened.tzinfo is None:
+        opened = opened.tz_localize('UTC')
+    now = pd.Timestamp.now(tz='UTC') if now is None else pd.Timestamp(now)
+    if now.tzinfo is None:
+        now = now.tz_localize('UTC')
+    return (now - (opened + pd.Timedelta(seconds=tf_s))).total_seconds()
+
+
 def calculate_asian_range(df: pd.DataFrame) -> tuple:
     """
     Calcule le range de la session asiatique (00:00–06:59 UTC) du jour UTC courant.

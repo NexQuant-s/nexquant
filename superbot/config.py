@@ -129,6 +129,11 @@ SIGNAL_ON_CLOSED_BAR = os.getenv("SIGNAL_ON_CLOSED_BAR", "false").lower() == "tr
 MURPHY_MIN_ADX = float(os.getenv("MURPHY_MIN_ADX", "20"))
 # Risque maximal accepté (% du solde) quand le lot minimum dépasse le risque cible (petit compte, or avec SL large)
 MIN_LOT_MAX_RISK_PCT = float(os.getenv("MIN_LOT_MAX_RISK_PCT", "1.5"))
+# Boost de taille (jusqu'à ×1,5) sur signaux à score élevé : absent du backtest validé → false pour la parité
+CONVICTION_BOOST_ENABLED = os.getenv("CONVICTION_BOOST_ENABLED", "true").lower() == "true"
+# Âge max (minutes) d'une bougie clôturée pour y entrer : évite de rejouer un ancien signal après un redémarrage
+# (le backtest entre à la clôture de la bougie). 0 = pas de limite.
+SIGNAL_MAX_BAR_AGE_MIN = float(os.getenv("SIGNAL_MAX_BAR_AGE_MIN", "10"))
 
 # Forex filters
 MAX_FOREX_CURRENCY_EXPOSURE = int(os.getenv("MAX_FOREX_CURRENCY_EXPOSURE", "2"))
@@ -527,7 +532,7 @@ __all__ = [
     "MIN_POSITION_SIZE", "MAX_POSITION_SIZE", "KELLY_FRACTION", "MIN_TRADES_FOR_KELLY",
     "COOLDOWN_SECONDS",
     "MAX_FOREX_CURRENCY_EXPOSURE", "MAX_SPREAD_PIPS", "MAX_SPREAD_PIPS_CRYPTO", "MAX_SPREAD_PIPS_COMMODITY",
-    "BE_DYN_RR", "BE_DYN_RR_RATIO", "ENABLED_STRATEGIES", "USE_STRATEGY_SL_TP", "SIGNAL_ON_CLOSED_BAR", "MURPHY_MIN_ADX", "MIN_LOT_MAX_RISK_PCT",
+    "BE_DYN_RR", "BE_DYN_RR_RATIO", "ENABLED_STRATEGIES", "USE_STRATEGY_SL_TP", "SIGNAL_ON_CLOSED_BAR", "MURPHY_MIN_ADX", "MIN_LOT_MAX_RISK_PCT", "CONVICTION_BOOST_ENABLED", "SIGNAL_MAX_BAR_AGE_MIN",
     "DRAWDOWN_REDUCE_5PCT", "DRAWDOWN_REDUCE_10PCT", "DRAWDOWN_THRESH_1", "DRAWDOWN_THRESH_2",
 
     # Protection nocturne

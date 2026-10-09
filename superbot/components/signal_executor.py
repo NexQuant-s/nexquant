@@ -506,7 +506,8 @@ def execute_signal_trade(bot, symbol: str, signal_data: dict, df_with_indicators
     )
 
     # Appliquer le boost de conviction (après le calcul de base)
-    if conviction_boost > 1.0 and position_size > 0:
+    from superbot.config import CONVICTION_BOOST_ENABLED
+    if CONVICTION_BOOST_ENABLED and conviction_boost > 1.0 and position_size > 0:
         size_before_boost = position_size
         boosted_size = position_size * conviction_boost
         # Le boost est re-cappé par MAX_POSITION_SIZE et par la marge max disponible.
